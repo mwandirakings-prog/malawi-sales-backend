@@ -38,7 +38,6 @@ app.post('/api/sales', async (req, res) => {
   try {
     const { sale_date, product, category, region, customer,
             quantity, unit_price, unit_cost, salesperson, payment } = req.body;
-
     const result = await pool.query(
       `INSERT INTO sales 
        (sale_date, product, category, region, customer,
@@ -131,7 +130,6 @@ app.get('/api/monthly', async (req, res) => {
 
 // ── INVENTORY ROUTES ──────────────────────────────────────
 
-// Get inventory summary KPIs
 app.get('/api/inventory/summary', async (req, res) => {
   try {
     const result = await pool.query(`
@@ -151,7 +149,6 @@ app.get('/api/inventory/summary', async (req, res) => {
   }
 });
 
-// Get all inventory
 app.get('/api/inventory', async (req, res) => {
   try {
     const result = await pool.query(
@@ -163,7 +160,6 @@ app.get('/api/inventory', async (req, res) => {
   }
 });
 
-// Add new product to inventory
 app.post('/api/inventory', async (req, res) => {
   const { product, category, unit_price, unit_cost,
           quantity_in_stock, reorder_level, supplier } = req.body;
@@ -181,7 +177,6 @@ app.post('/api/inventory', async (req, res) => {
   }
 });
 
-// Update stock
 app.put('/api/inventory/:id', async (req, res) => {
   const { id } = req.params;
   const { quantity_in_stock, unit_price, unit_cost,
@@ -201,12 +196,77 @@ app.put('/api/inventory/:id', async (req, res) => {
   }
 });
 
-// Delete product
 app.delete('/api/inventory/:id', async (req, res) => {
   const { id } = req.params;
   try {
     await pool.query('DELETE FROM inventory WHERE id=$1', [id]);
     res.json({ success: true, message: 'Product deleted' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── USER MANAGEMENT ROUTES ────────────────────────────────
+
+app.get('/api/users', async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT id, name, email, role, region, active, created_at FROM users ORDER BY created_at DESC'
+    );
+    res.json({ success: true, data: result.rows });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/users', async (req, res) => {
+  const { name, email, password, role, region } = req.body;
+  try {
+    const result = await pool.query(
+      `INSERT INTO users (name, email, password, role, region)
+       VALUES ($1,$2,$3,$4,$5) RETURNING id, name, email, role, region, active`,
+      [name, email, password, role, region]
+    );
+    res.json({ success: true, data: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.put('/api/users/:id', async (req, res) => {
+  const { id } = req.params;
+  const { name, role, region, active } = req.body;
+  try {
+    const result = await pool.query(
+      `UPDATE users SET name=$1, role=$2, region=$3, active=$4
+       WHERE id=$5 RETURNING id, name, email, role, region, active`,
+      [name, role, region, active, id]
+    );
+    res.json({ success: true, data: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.put('/api/users/:id/password', async (req, res) => {
+  const { id } = req.params;
+  const { password } = req.body;
+  try {
+    await pool.query(
+      'UPDATE users SET password=$1 WHERE id=$2',
+      [password, id]
+    );
+    res.json({ success: true, message: 'Password reset successfully' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.delete('/api/users/:id', async (req, res) => {
+  const { id } = req.params;
+  try {
+    await pool.query('DELETE FROM users WHERE id=$1', [id]);
+    res.json({ success: true, message: 'User deleted successfully' });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
