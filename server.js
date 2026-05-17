@@ -12,7 +12,6 @@ app.use(express.json());
 const authRoutes = require('./auth');
 app.use('/api/auth', authRoutes);
 
-// ── TEST ROUTE ────────────────────────────────────────────
 app.get('/', (req, res) => {
   res.json({
     message: 'SABIAS Multi-Company API is running!',
@@ -28,6 +27,16 @@ app.post('/api/companies/register', async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    const existing = await client.query(
+      'SELECT id FROM companies WHERE email = $1', [email]
+    );
+    if (existing.rows.length > 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        success: false,
+        error: 'A company with this email already exists!'
+      });
+    }
     const compResult = await client.query(
       `INSERT INTO companies (name, email, phone, city, address)
        VALUES ($1,$2,$3,$4,$5) RETURNING *`,
@@ -35,13 +44,17 @@ app.post('/api/companies/register', async (req, res) => {
     );
     const company = compResult.rows[0];
     await client.query(
-      `INSERT INTO users (name, email, password, role, region, company_id)
-       VALUES ($1,$2,$3,'admin','all',$4)`,
+      `INSERT INTO users (name, email, password, role, region, company_id, active)
+       VALUES ($1,$2,$3,'admin','all',$4, true)`,
       [admin_name, email, password, company.id]
     );
     await client.query('COMMIT');
-    res.json({ success: true, message: 'Company registered successfully!',
-               company_id: company.id });
+    res.json({
+      success: true,
+      message: 'Company registered successfully!',
+      company_id: company.id,
+      company_name: company.name
+    });
   } catch (err) {
     await client.query('ROLLBACK');
     res.status(500).json({ success: false, error: err.message });
@@ -50,7 +63,7 @@ app.post('/api/companies/register', async (req, res) => {
   }
 });
 
-// ── GET ALL COMPANIES (Super Admin) ───────────────────────
+// ── GET ALL COMPANIES ─────────────────────────────────────
 app.get('/api/companies', async (req, res) => {
   try {
     const result = await pool.query(
@@ -65,7 +78,7 @@ app.get('/api/companies', async (req, res) => {
   }
 });
 
-// ── GET ALL SALES (filtered by company) ───────────────────
+// ── GET ALL SALES ─────────────────────────────────────────
 app.get('/api/sales', async (req, res) => {
   try {
     const { company_id } = req.query;
@@ -190,7 +203,6 @@ app.get('/api/monthly', async (req, res) => {
 });
 
 // ── INVENTORY ROUTES ──────────────────────────────────────
-
 app.get('/api/inventory/summary', async (req, res) => {
   try {
     const { company_id } = req.query;
@@ -278,7 +290,6 @@ app.delete('/api/inventory/:id', async (req, res) => {
 });
 
 // ── USER MANAGEMENT ROUTES ────────────────────────────────
-
 app.get('/api/users', async (req, res) => {
   try {
     const { company_id } = req.query;
