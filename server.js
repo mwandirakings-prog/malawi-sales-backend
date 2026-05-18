@@ -1,3 +1,4 @@
+const https = require('https');
 const express = require('express');
 const cors = require('cors');
 require('dotenv').config();
@@ -19,6 +20,37 @@ app.get('/', (req, res) => {
     currency: 'MWK'
   });
 });
+
+// ── EMAIL HELPER ──────────────────────────────────────────
+const sendEmail = async (to, subject, html) => {
+  return new Promise((resolve, reject) => {
+    const data = JSON.stringify({
+      from: 'SABIAS <onboarding@resend.dev>',
+      to: [to],
+      subject,
+      html,
+    });
+    const options = {
+      hostname: 'api.resend.com',
+      port: 443,
+      path: '/emails',
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer re_3rnFvwpk_5mFTNHqCRKjexghimbN1REfb',
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(data),
+      },
+    };
+    const req = https.request(options, (res) => {
+      let body = '';
+      res.on('data', (chunk) => body += chunk);
+      res.on('end', () => resolve(body));
+    });
+    req.on('error', reject);
+    req.write(data);
+    req.end();
+  });
+};
 
 // ── COMPANY REGISTRATION ──────────────────────────────────
 app.post('/api/companies/register', async (req, res) => {
@@ -49,6 +81,132 @@ app.post('/api/companies/register', async (req, res) => {
       [admin_name, email, password, company.id]
     );
     await client.query('COMMIT');
+
+    // ── Welcome email to new company ──────────────────────
+    const welcomeHtml = `
+      <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;
+                  background:#FFF8F0;padding:32px;border-radius:12px;">
+        <div style="background:#3E1F00;padding:20px 32px;border-radius:10px;
+                    text-align:center;margin-bottom:24px;">
+          <div style="color:#FFB800;font-size:28px;font-weight:bold;
+                      letter-spacing:4px;">SABIAS</div>
+          <div style="color:#FF6B35;font-size:11px;margin-top:4px;">
+            Sales & Business Intelligence Analytics System
+          </div>
+        </div>
+        <h2 style="color:#3E1F00;margin:0 0 8px;">
+          Hi ${admin_name}! 👋
+        </h2>
+        <p style="color:#555;font-size:15px;line-height:1.6;">
+          Welcome to <strong>SABIAS</strong>! Your company
+          <strong style="color:#FF6B35;">${company_name}</strong>
+          has been successfully registered on our platform.
+        </p>
+        <div style="background:white;border-radius:10px;padding:20px;
+                    margin:20px 0;border-left:4px solid #FF6B35;">
+          <div style="color:#888;font-size:12px;margin-bottom:8px;
+                      font-weight:bold;">YOUR LOGIN DETAILS</div>
+          <div style="color:#3E1F00;font-size:14px;margin:6px 0;">
+            📧 Email: <strong>${email}</strong>
+          </div>
+          <div style="color:#3E1F00;font-size:14px;margin:6px 0;">
+            🏢 Company: <strong>${company_name}</strong>
+          </div>
+          <div style="color:#3E1F00;font-size:14px;margin:6px 0;">
+            📍 District: <strong>${city}</strong>
+          </div>
+          <div style="color:#3E1F00;font-size:14px;margin:6px 0;">
+            👤 Admin: <strong>${admin_name}</strong>
+          </div>
+        </div>
+        <p style="color:#555;font-size:14px;line-height:1.6;">
+          You can now login at
+          <a href="https://sabias-dashboard.vercel.app"
+             style="color:#FF6B35;font-weight:bold;">
+            sabias-dashboard.vercel.app
+          </a>
+          and start recording your sales, managing inventory
+          and viewing analytics.
+        </p>
+        <div style="background:#3E1F00;border-radius:10px;padding:16px;
+                    text-align:center;margin-top:24px;">
+          <a href="https://sabias-dashboard.vercel.app"
+             style="color:#FFB800;font-weight:bold;font-size:15px;
+                    text-decoration:none;">
+            🚀 Login to SABIAS →
+          </a>
+        </div>
+        <div style="text-align:center;margin-top:24px;
+                    color:#888;font-size:12px;">
+          <p>Need help? Contact your SABIAS administrator.</p>
+          <p style="margin-top:8px;">
+            <strong style="color:#3E1F00;">Kings Mwandira</strong><br/>
+            CEO, SABIAS<br/>
+            Sales & Business Intelligence Analytics System 🇲🇼
+          </p>
+        </div>
+      </div>
+    `;
+
+    // ── Notification email to Kings ───────────────────────
+    const notifyHtml = `
+      <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;
+                  background:#FFF8F0;padding:32px;border-radius:12px;">
+        <div style="background:#3E1F00;padding:20px 32px;border-radius:10px;
+                    text-align:center;margin-bottom:24px;">
+          <div style="color:#FFB800;font-size:28px;font-weight:bold;
+                      letter-spacing:4px;">SABIAS</div>
+          <div style="color:#FF6B35;font-size:11px;margin-top:4px;">
+            New Company Registration Alert
+          </div>
+        </div>
+        <h2 style="color:#3E1F00;">🎉 New Company Registered!</h2>
+        <p style="color:#555;font-size:14px;">
+          A new business has just joined SABIAS. Here are their details:
+        </p>
+        <div style="background:white;border-radius:10px;padding:20px;
+                    margin:20px 0;border-left:4px solid #2D6A4F;">
+          <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
+            🏢 Company: <strong>${company_name}</strong>
+          </div>
+          <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
+            👤 Admin Name: <strong>${admin_name}</strong>
+          </div>
+          <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
+            📧 Email: <strong>${email}</strong>
+          </div>
+          <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
+            📱 Phone: <strong>${phone}</strong>
+          </div>
+          <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
+            📍 District: <strong>${city}</strong>
+          </div>
+          <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
+            🏠 Address: <strong>${address || 'Not provided'}</strong>
+          </div>
+          <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
+            🕐 Registered: <strong>${new Date().toLocaleString()}</strong>
+          </div>
+        </div>
+        <p style="color:#555;font-size:13px;">
+          💡 You can call <strong>${phone}</strong> to follow up
+          with this client for marketing or support.
+        </p>
+        <div style="text-align:center;margin-top:16px;
+                    color:#888;font-size:11px;">
+          SABIAS Auto-Notification System 🇲🇼
+        </div>
+      </div>
+    `;
+
+    // Send both emails — don't block response
+    sendEmail(email, `Welcome to SABIAS, ${admin_name}!`, welcomeHtml)
+      .catch(err => console.error('Welcome email error:', err));
+
+    sendEmail('mwandirakings@gmail.com',
+      `🎉 New SABIAS Registration: ${company_name}`, notifyHtml)
+      .catch(err => console.error('Notify email error:', err));
+
     res.json({
       success: true,
       message: 'Company registered successfully!',
@@ -341,7 +499,8 @@ app.put('/api/users/:id/password', async (req, res) => {
   const { id } = req.params;
   const { password } = req.body;
   try {
-    await pool.query('UPDATE users SET password=$1 WHERE id=$2', [password, id]);
+    await pool.query('UPDATE users SET password=$1 WHERE id=$2',
+      [password, id]);
     res.json({ success: true, message: 'Password reset successfully' });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
