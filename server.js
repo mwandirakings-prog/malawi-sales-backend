@@ -199,7 +199,6 @@ app.post('/api/companies/register', async (req, res) => {
       </div>
     `;
 
-    // Send both emails — don't block response
     sendEmail(email, `Welcome to SABIAS, ${admin_name}!`, welcomeHtml)
       .catch(err => console.error('Welcome email error:', err));
 
