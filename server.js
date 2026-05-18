@@ -121,7 +121,7 @@ app.post('/api/companies/register', async (req, res) => {
         </div>
         <p style="color:#555;font-size:14px;line-height:1.6;">
           You can now login at
-          <a href="https://sabias-dashboard.vercel.app"
+          <a href="https://www.sabiasanalytics.com"
              style="color:#FF6B35;font-weight:bold;">
             sabias-dashboard.vercel.app
           </a>
@@ -130,7 +130,7 @@ app.post('/api/companies/register', async (req, res) => {
         </p>
         <div style="background:#3E1F00;border-radius:10px;padding:16px;
                     text-align:center;margin-top:24px;">
-          <a href="https://sabias-dashboard.vercel.app"
+          <a href="https://www.sabiasanalytics.com"
              style="color:#FFB800;font-weight:bold;font-size:15px;
                     text-decoration:none;">
             🚀 Login to SABIAS →
