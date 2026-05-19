@@ -95,7 +95,7 @@ app.post('/api/companies/register', async (req, res) => {
           </div>
         </div>
         <h2 style="color:#3E1F00;margin:0 0 8px;">
-          Hi ${admin_name}! 👋
+          Hi ${admin_name},
         </h2>
         <p style="color:#555;font-size:15px;line-height:1.6;">
           Welcome to <strong>SABIAS</strong>! Your company
@@ -105,25 +105,25 @@ app.post('/api/companies/register', async (req, res) => {
         <div style="background:white;border-radius:10px;padding:20px;
                     margin:20px 0;border-left:4px solid #FF6B35;">
           <div style="color:#888;font-size:12px;margin-bottom:8px;
-                      font-weight:bold;">YOUR LOGIN DETAILS</div>
+                      font-weight:bold;">YOUR REGISTRATION DETAILS</div>
           <div style="color:#3E1F00;font-size:14px;margin:6px 0;">
-            📧 Email: <strong>${email}</strong>
+            Email: <strong>${email}</strong>
           </div>
           <div style="color:#3E1F00;font-size:14px;margin:6px 0;">
-            🏢 Company: <strong>${company_name}</strong>
+            Company: <strong>${company_name}</strong>
           </div>
           <div style="color:#3E1F00;font-size:14px;margin:6px 0;">
-            📍 District: <strong>${city}</strong>
+            District: <strong>${city}</strong>
           </div>
           <div style="color:#3E1F00;font-size:14px;margin:6px 0;">
-            👤 Admin: <strong>${admin_name}</strong>
+            Admin: <strong>${admin_name}</strong>
           </div>
         </div>
         <p style="color:#555;font-size:14px;line-height:1.6;">
           You can now login at
           <a href="https://www.sabiasanalytics.com"
              style="color:#FF6B35;font-weight:bold;">
-            sabias-dashboard.vercel.app
+            www.sabiasanalytics.com
           </a>
           and start recording your sales, managing inventory
           and viewing analytics.
@@ -133,7 +133,7 @@ app.post('/api/companies/register', async (req, res) => {
           <a href="https://www.sabiasanalytics.com"
              style="color:#FFB800;font-weight:bold;font-size:15px;
                     text-decoration:none;">
-            🚀 Login to SABIAS →
+            Login to SABIAS
           </a>
         </div>
         <div style="text-align:center;margin-top:24px;
@@ -142,7 +142,7 @@ app.post('/api/companies/register', async (req, res) => {
           <p style="margin-top:8px;">
             <strong style="color:#3E1F00;">Kings Mwandira</strong><br/>
             CEO, SABIAS<br/>
-            Sales & Business Intelligence Analytics System 🇲🇼
+            Sales & Business Intelligence Analytics System
           </p>
         </div>
       </div>
@@ -160,41 +160,41 @@ app.post('/api/companies/register', async (req, res) => {
             New Company Registration Alert
           </div>
         </div>
-        <h2 style="color:#3E1F00;">🎉 New Company Registered!</h2>
+        <h2 style="color:#3E1F00;">New Company Registered!</h2>
         <p style="color:#555;font-size:14px;">
           A new business has just joined SABIAS. Here are their details:
         </p>
         <div style="background:white;border-radius:10px;padding:20px;
                     margin:20px 0;border-left:4px solid #2D6A4F;">
           <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
-            🏢 Company: <strong>${company_name}</strong>
+            Company: <strong>${company_name}</strong>
           </div>
           <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
-            👤 Admin Name: <strong>${admin_name}</strong>
+            Admin Name: <strong>${admin_name}</strong>
           </div>
           <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
-            📧 Email: <strong>${email}</strong>
+            Email: <strong>${email}</strong>
           </div>
           <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
-            📱 Phone: <strong>${phone}</strong>
+            Phone: <strong>${phone}</strong>
           </div>
           <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
-            📍 District: <strong>${city}</strong>
+            District: <strong>${city}</strong>
           </div>
           <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
-            🏠 Address: <strong>${address || 'Not provided'}</strong>
+            Address: <strong>${address || 'Not provided'}</strong>
           </div>
           <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
-            🕐 Registered: <strong>${new Date().toLocaleString()}</strong>
+            Registered: <strong>${new Date().toLocaleString()}</strong>
           </div>
         </div>
         <p style="color:#555;font-size:13px;">
-          💡 You can call <strong>${phone}</strong> to follow up
+          You can call <strong>${phone}</strong> to follow up
           with this client for marketing or support.
         </p>
         <div style="text-align:center;margin-top:16px;
                     color:#888;font-size:11px;">
-          SABIAS Auto-Notification System 🇲🇼
+          SABIAS Auto-Notification System
         </div>
       </div>
     `;
@@ -203,7 +203,7 @@ app.post('/api/companies/register', async (req, res) => {
       .catch(err => console.error('Welcome email error:', err));
 
     sendEmail('mwandirakings@gmail.com',
-      `🎉 New SABIAS Registration: ${company_name}`, notifyHtml)
+      `New SABIAS Registration: ${company_name}`, notifyHtml)
       .catch(err => console.error('Notify email error:', err));
 
     res.json({
