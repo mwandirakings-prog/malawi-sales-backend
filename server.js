@@ -25,7 +25,7 @@ app.get('/', (req, res) => {
 const sendEmail = async (to, subject, html) => {
   return new Promise((resolve, reject) => {
     const data = JSON.stringify({
-      from: 'SABIAS <onboarding@resend.dev>',
+      from: 'SABIAS <noreply@sabiasanalytics.com>',
       to: [to],
       subject,
       html,
@@ -217,6 +217,136 @@ app.post('/api/companies/register', async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   } finally {
     client.release();
+  }
+});
+
+// ── FORGOT PASSWORD ───────────────────────────────────────
+app.post('/api/auth/forgot-password', async (req, res) => {
+  const { email } = req.body;
+  try {
+    const result = await pool.query(
+      'SELECT * FROM users WHERE email = $1', [email]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'No account found with this email address.'
+      });
+    }
+
+    const user = result.rows[0];
+
+    if (user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        role: user.role,
+        error: 'Contact your admin to reset your password.'
+      });
+    }
+
+    const token = Math.random().toString(36).slice(2) +
+                  Math.random().toString(36).slice(2);
+    const expiry = new Date(Date.now() + 60 * 60 * 1000);
+
+    await pool.query(
+      `UPDATE users SET reset_token = $1, reset_token_expiry = $2
+       WHERE email = $3`,
+      [token, expiry, email]
+    );
+
+    const resetLink =
+      `https://www.sabiasanalytics.com?reset=${token}`;
+
+    const resetHtml = `
+      <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;
+                  background:#FFF8F0;padding:32px;border-radius:12px;">
+        <div style="background:#3E1F00;padding:20px 32px;border-radius:10px;
+                    text-align:center;margin-bottom:24px;">
+          <div style="color:#FFB800;font-size:28px;font-weight:bold;
+                      letter-spacing:4px;">SABIAS</div>
+          <div style="color:#FF6B35;font-size:11px;margin-top:4px;">
+            Sales & Business Intelligence Analytics System
+          </div>
+        </div>
+        <h2 style="color:#3E1F00;margin:0 0 8px;">
+          Password Reset Request
+        </h2>
+        <p style="color:#555;font-size:14px;line-height:1.6;">
+          Hi ${user.name}, we received a request to reset the password
+          for your SABIAS admin account.
+        </p>
+        <p style="color:#555;font-size:14px;line-height:1.6;">
+          Click the button below to reset your password.
+          This link expires in 1 hour.
+        </p>
+        <div style="background:#3E1F00;border-radius:10px;padding:16px;
+                    text-align:center;margin:24px 0;">
+          <a href="${resetLink}"
+             style="color:#FFB800;font-weight:bold;font-size:15px;
+                    text-decoration:none;">
+            Reset My Password
+          </a>
+        </div>
+        <div style="background:white;border-radius:10px;padding:16px;
+                    border-left:4px solid #FF6B35;margin-bottom:20px;">
+          <div style="color:#888;font-size:12px;margin-bottom:4px;
+                      font-weight:bold;">SECURITY NOTICE</div>
+          <div style="color:#555;font-size:13px;">
+            If you did not request this password reset, please ignore
+            this email. Your password will remain unchanged.
+          </div>
+        </div>
+        <div style="text-align:center;color:#888;font-size:12px;">
+          <p>This link expires in 1 hour for security reasons.</p>
+          <p style="margin-top:8px;">
+            <strong style="color:#3E1F00;">Kings Mwandira</strong><br/>
+            CEO, SABIAS<br/>
+            Sales & Business Intelligence Analytics System
+          </p>
+        </div>
+      </div>
+    `;
+
+    sendEmail(email, 'SABIAS Password Reset Request', resetHtml)
+      .catch(err => console.error('Reset email error:', err));
+
+    res.json({
+      success: true,
+      message: 'Password reset link sent to your email!'
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── RESET PASSWORD ────────────────────────────────────────
+app.post('/api/auth/reset-password', async (req, res) => {
+  const { token, password } = req.body;
+  try {
+    const result = await pool.query(
+      `SELECT * FROM users
+       WHERE reset_token = $1
+       AND reset_token_expiry > NOW()`,
+      [token]
+    );
+    if (result.rows.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Reset link is invalid or has expired. Please request a new one.'
+      });
+    }
+    await pool.query(
+      `UPDATE users
+       SET password = $1, reset_token = NULL, reset_token_expiry = NULL
+       WHERE reset_token = $2`,
+      [password, token]
+    );
+    res.json({
+      success: true,
+      message: 'Password reset successfully! You can now login.'
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
