@@ -11,9 +11,7 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-const authRoutes = require('./auth');
-app.use('/api/auth', authRoutes);
-
+// ── ROOT ──────────────────────────────────────────────────
 app.get('/', (req, res) => {
   res.json({
     message: 'SABIAS Multi-Company API is running!',
@@ -53,159 +51,55 @@ const sendEmail = async (to, subject, html) => {
   });
 };
 
-// ── COMPANY REGISTRATION (public) ────────────────────────
-app.post('/api/companies/register', async (req, res) => {
-  const { company_name, email, phone, city, address,
-          admin_name, password } = req.body;
-  const client = await pool.connect();
+// ── LOGIN ─────────────────────────────────────────────────
+const jwt = require('jsonwebtoken');
+const JWT_SECRET = process.env.JWT_SECRET || 'sabias-secret-key-2026';
+
+app.post('/api/auth/login', async (req, res) => {
+  const { email, password } = req.body;
   try {
-    await client.query('BEGIN');
-    const existing = await client.query(
-      'SELECT id FROM companies WHERE email = $1', [email]
+    const result = await pool.query(
+      `SELECT u.*, c.name as company_name
+       FROM users u
+       LEFT JOIN companies c ON c.id = u.company_id
+       WHERE LOWER(u.email) = LOWER($1)
+       AND u.password = $2
+       AND u.active = true`,
+      [email, password]
     );
-    if (existing.rows.length > 0) {
-      await client.query('ROLLBACK');
-      return res.status(400).json({
+    if (result.rows.length === 0) {
+      return res.status(401).json({
         success: false,
-        error: 'A company with this email already exists!'
+        message: 'Invalid email or password or account deactivated.'
       });
     }
-    const compResult = await client.query(
-      `INSERT INTO companies (name, email, phone, city, address)
-       VALUES ($1,$2,$3,$4,$5) RETURNING *`,
-      [company_name, email, phone, city, address]
+    const user = result.rows[0];
+    const token = jwt.sign(
+      {
+        id: user.id,
+        email: user.email,
+        role: user.role,
+        company_id: user.company_id,
+        region: user.region,
+      },
+      JWT_SECRET,
+      { expiresIn: '7d' }
     );
-    const company = compResult.rows[0];
-    await client.query(
-      `INSERT INTO users
-       (name, email, password, role, region, company_id, active)
-       VALUES ($1,$2,$3,'admin','all',$4, true)`,
-      [admin_name, email, password, company.id]
-    );
-    await client.query('COMMIT');
-
-    const welcomeHtml = `
-      <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;
-                  background:#FFF8F0;padding:32px;border-radius:12px;">
-        <div style="background:#3E1F00;padding:20px 32px;border-radius:10px;
-                    text-align:center;margin-bottom:24px;">
-          <div style="color:#FFB800;font-size:28px;font-weight:bold;
-                      letter-spacing:4px;">SABIAS</div>
-          <div style="color:#FF6B35;font-size:11px;margin-top:4px;">
-            Sales & Business Intelligence Analytics System
-          </div>
-        </div>
-        <h2 style="color:#3E1F00;margin:0 0 8px;">Hi ${admin_name},</h2>
-        <p style="color:#555;font-size:15px;line-height:1.6;">
-          Welcome to <strong>SABIAS</strong>! Your company
-          <strong style="color:#FF6B35;">${company_name}</strong>
-          has been successfully registered on our platform.
-        </p>
-        <div style="background:white;border-radius:10px;padding:20px;
-                    margin:20px 0;border-left:4px solid #FF6B35;">
-          <div style="color:#888;font-size:12px;margin-bottom:8px;
-                      font-weight:bold;">YOUR REGISTRATION DETAILS</div>
-          <div style="color:#3E1F00;font-size:14px;margin:6px 0;">
-            Email: <strong>${email}</strong>
-          </div>
-          <div style="color:#3E1F00;font-size:14px;margin:6px 0;">
-            Company: <strong>${company_name}</strong>
-          </div>
-          <div style="color:#3E1F00;font-size:14px;margin:6px 0;">
-            District: <strong>${city}</strong>
-          </div>
-          <div style="color:#3E1F00;font-size:14px;margin:6px 0;">
-            Admin: <strong>${admin_name}</strong>
-          </div>
-        </div>
-        <p style="color:#555;font-size:14px;line-height:1.6;">
-          You can now login at
-          <a href="https://www.sabiasanalytics.com"
-             style="color:#FF6B35;font-weight:bold;">
-            www.sabiasanalytics.com
-          </a>
-        </p>
-        <div style="background:#3E1F00;border-radius:10px;padding:16px;
-                    text-align:center;margin-top:24px;">
-          <a href="https://www.sabiasanalytics.com"
-             style="color:#FFB800;font-weight:bold;font-size:15px;
-                    text-decoration:none;">
-            Login to SABIAS
-          </a>
-        </div>
-        <div style="text-align:center;margin-top:24px;color:#888;font-size:12px;">
-          <p>Need help? Contact your SABIAS administrator.</p>
-          <p style="margin-top:8px;">
-            <strong style="color:#3E1F00;">Kings Mwandira</strong><br/>
-            CEO, SABIAS
-          </p>
-        </div>
-      </div>`;
-
-    const notifyHtml = `
-      <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;
-                  background:#FFF8F0;padding:32px;border-radius:12px;">
-        <div style="background:#3E1F00;padding:20px 32px;border-radius:10px;
-                    text-align:center;margin-bottom:24px;">
-          <div style="color:#FFB800;font-size:28px;font-weight:bold;
-                      letter-spacing:4px;">SABIAS</div>
-          <div style="color:#FF6B35;font-size:11px;margin-top:4px;">
-            New Company Registration Alert
-          </div>
-        </div>
-        <h2 style="color:#3E1F00;">New Company Registered!</h2>
-        <p style="color:#555;font-size:14px;">
-          A new business has just joined SABIAS:
-        </p>
-        <div style="background:white;border-radius:10px;padding:20px;
-                    margin:20px 0;border-left:4px solid #2D6A4F;">
-          <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
-            Company: <strong>${company_name}</strong>
-          </div>
-          <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
-            Admin: <strong>${admin_name}</strong>
-          </div>
-          <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
-            Email: <strong>${email}</strong>
-          </div>
-          <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
-            Phone: <strong>${phone}</strong>
-          </div>
-          <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
-            District: <strong>${city}</strong>
-          </div>
-          <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
-            Address: <strong>${address || 'Not provided'}</strong>
-          </div>
-          <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
-            Registered: <strong>${new Date().toLocaleString()}</strong>
-          </div>
-        </div>
-        <p style="color:#555;font-size:13px;">
-          You can call <strong>${phone}</strong> to follow up.
-        </p>
-        <div style="text-align:center;margin-top:16px;color:#888;font-size:11px;">
-          SABIAS Auto-Notification System
-        </div>
-      </div>`;
-
-    sendEmail(email, `Welcome to SABIAS, ${admin_name}!`, welcomeHtml)
-      .catch(err => console.error('Welcome email error:', err));
-    sendEmail('mwandirakings@gmail.com',
-      `New SABIAS Registration: ${company_name}`, notifyHtml)
-      .catch(err => console.error('Notify email error:', err));
-
     res.json({
       success: true,
-      message: 'Company registered successfully!',
-      company_id: company.id,
-      company_name: company.name
+      token,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        region: user.region,
+        company_id: user.company_id,
+        company: user.company_name || 'SABIAS',
+      }
     });
   } catch (err) {
-    await client.query('ROLLBACK');
-    res.status(500).json({ success: false, error: err.message });
-  } finally {
-    client.release();
+    res.status(500).json({ success: false, message: err.message });
   }
 });
 
@@ -213,8 +107,11 @@ app.post('/api/companies/register', async (req, res) => {
 app.post('/api/auth/forgot-password', async (req, res) => {
   const { email } = req.body;
   try {
+    // FIXED — LOWER() for case insensitive match
     const result = await pool.query(
-      'SELECT * FROM users WHERE email = $1', [email]
+      `SELECT * FROM users
+       WHERE LOWER(email) = LOWER($1) AND active = true`,
+      [email]
     );
     if (result.rows.length === 0) {
       return res.status(404).json({
@@ -235,7 +132,7 @@ app.post('/api/auth/forgot-password', async (req, res) => {
     const expiry = new Date(Date.now() + 60 * 60 * 1000);
     await pool.query(
       `UPDATE users SET reset_token = $1, reset_token_expiry = $2
-       WHERE email = $3`,
+       WHERE LOWER(email) = LOWER($3)`,
       [token, expiry, email]
     );
     const resetLink = `https://www.sabiasanalytics.com?reset=${token}`;
@@ -285,9 +182,12 @@ app.post('/api/auth/forgot-password', async (req, res) => {
 app.post('/api/auth/reset-password', async (req, res) => {
   const { token, password } = req.body;
   try {
+    // FIXED — find user first, then update by id
     const result = await pool.query(
       `SELECT * FROM users
-       WHERE reset_token = $1 AND reset_token_expiry > NOW()`,
+       WHERE reset_token = $1
+       AND reset_token_expiry > NOW()
+       AND active = true`,
       [token]
     );
     if (result.rows.length === 0) {
@@ -296,10 +196,13 @@ app.post('/api/auth/reset-password', async (req, res) => {
         error: 'Reset link is invalid or expired. Please request a new one.'
       });
     }
+    const user = result.rows[0];
+    // Update by id — not by token (token is being cleared!)
     await pool.query(
-      `UPDATE users SET password=$1, reset_token=NULL,
-       reset_token_expiry=NULL WHERE reset_token=$2`,
-      [password, token]
+      `UPDATE users SET password = $1,
+       reset_token = NULL, reset_token_expiry = NULL
+       WHERE id = $2`,
+      [password, user.id]
     );
     res.json({ success: true, message: 'Password reset successfully!' });
   } catch (err) {
@@ -307,7 +210,151 @@ app.post('/api/auth/reset-password', async (req, res) => {
   }
 });
 
-// ── GET ALL COMPANIES (admin only) ────────────────────────
+// ── COMPANY REGISTRATION (public) ────────────────────────
+app.post('/api/companies/register', async (req, res) => {
+  const { company_name, email, phone, city, address,
+          admin_name, password } = req.body;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const existing = await client.query(
+      'SELECT id FROM companies WHERE LOWER(email) = LOWER($1)', [email]
+    );
+    if (existing.rows.length > 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        success: false,
+        error: 'A company with this email already exists!'
+      });
+    }
+    const compResult = await client.query(
+      `INSERT INTO companies (name, email, phone, city, address)
+       VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+      [company_name, email, phone, city, address]
+    );
+    const company = compResult.rows[0];
+    await client.query(
+      `INSERT INTO users
+       (name, email, password, role, region, company_id, active)
+       VALUES ($1,$2,$3,'admin','all',$4, true)`,
+      [admin_name, email, password, company.id]
+    );
+    await client.query('COMMIT');
+
+    const welcomeHtml = `
+      <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;
+                  background:#FFF8F0;padding:32px;border-radius:12px;">
+        <div style="background:#3E1F00;padding:20px 32px;border-radius:10px;
+                    text-align:center;margin-bottom:24px;">
+          <div style="color:#FFB800;font-size:28px;font-weight:bold;
+                      letter-spacing:4px;">SABIAS</div>
+          <div style="color:#FF6B35;font-size:11px;margin-top:4px;">
+            Sales & Business Intelligence Analytics System
+          </div>
+        </div>
+        <h2 style="color:#3E1F00;margin:0 0 8px;">Hi ${admin_name},</h2>
+        <p style="color:#555;font-size:15px;line-height:1.6;">
+          Welcome to <strong>SABIAS</strong>! Your company
+          <strong style="color:#FF6B35;">${company_name}</strong>
+          has been successfully registered.
+        </p>
+        <div style="background:white;border-radius:10px;padding:20px;
+                    margin:20px 0;border-left:4px solid #FF6B35;">
+          <div style="color:#888;font-size:12px;margin-bottom:8px;
+                      font-weight:bold;">YOUR REGISTRATION DETAILS</div>
+          <div style="color:#3E1F00;font-size:14px;margin:6px 0;">
+            Email: <strong>${email}</strong>
+          </div>
+          <div style="color:#3E1F00;font-size:14px;margin:6px 0;">
+            Company: <strong>${company_name}</strong>
+          </div>
+          <div style="color:#3E1F00;font-size:14px;margin:6px 0;">
+            District: <strong>${city}</strong>
+          </div>
+          <div style="color:#3E1F00;font-size:14px;margin:6px 0;">
+            Admin: <strong>${admin_name}</strong>
+          </div>
+        </div>
+        <p style="color:#555;font-size:14px;line-height:1.6;">
+          Login at
+          <a href="https://www.sabiasanalytics.com"
+             style="color:#FF6B35;font-weight:bold;">
+            www.sabiasanalytics.com
+          </a>
+        </p>
+        <div style="background:#3E1F00;border-radius:10px;padding:16px;
+                    text-align:center;margin-top:24px;">
+          <a href="https://www.sabiasanalytics.com"
+             style="color:#FFB800;font-weight:bold;font-size:15px;
+                    text-decoration:none;">
+            Login to SABIAS
+          </a>
+        </div>
+        <div style="text-align:center;margin-top:24px;color:#888;font-size:12px;">
+          <strong style="color:#3E1F00;">Kings Mwandira</strong><br/>
+          CEO, SABIAS
+        </div>
+      </div>`;
+
+    const notifyHtml = `
+      <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;
+                  background:#FFF8F0;padding:32px;border-radius:12px;">
+        <div style="background:#3E1F00;padding:20px 32px;border-radius:10px;
+                    text-align:center;margin-bottom:24px;">
+          <div style="color:#FFB800;font-size:28px;font-weight:bold;
+                      letter-spacing:4px;">SABIAS</div>
+          <div style="color:#FF6B35;font-size:11px;margin-top:4px;">
+            New Company Registration Alert
+          </div>
+        </div>
+        <h2 style="color:#3E1F00;">New Company Registered!</h2>
+        <div style="background:white;border-radius:10px;padding:20px;
+                    margin:20px 0;border-left:4px solid #2D6A4F;">
+          <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
+            Company: <strong>${company_name}</strong>
+          </div>
+          <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
+            Admin: <strong>${admin_name}</strong>
+          </div>
+          <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
+            Email: <strong>${email}</strong>
+          </div>
+          <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
+            Phone: <strong>${phone}</strong>
+          </div>
+          <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
+            District: <strong>${city}</strong>
+          </div>
+          <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
+            Registered: <strong>${new Date().toLocaleString()}</strong>
+          </div>
+        </div>
+        <div style="text-align:center;margin-top:16px;color:#888;font-size:11px;">
+          SABIAS Auto-Notification System
+        </div>
+      </div>`;
+
+    sendEmail(email, `Welcome to SABIAS, ${admin_name}!`, welcomeHtml)
+      .catch(err => console.error('Welcome email error:', err));
+    sendEmail('mwandirakings@gmail.com',
+      `New SABIAS Registration: ${company_name}`, notifyHtml)
+      .catch(err => console.error('Notify email error:', err));
+
+    res.json({
+      success: true,
+      message: 'Company registered successfully!',
+      company_id: company.id,
+      company_name: company.name
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ success: false, error: err.message });
+  } finally {
+    client.release();
+  }
+});
+
+// ── GET ALL COMPANIES ─────────────────────────────────────
 app.get('/api/companies', protect, adminOnly, async (req, res) => {
   try {
     const result = await pool.query(
@@ -595,6 +642,12 @@ app.delete('/api/users/:id', protect, adminOnly, async (req, res) => {
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
+});
+
+// ── GLOBAL ERROR HANDLER ──────────────────────────────────
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err.message);
+  res.status(500).json({ success: false, error: 'Internal server error' });
 });
 
 // ── START SERVER ──────────────────────────────────────────
