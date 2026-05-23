@@ -657,14 +657,17 @@ app.post('/api/companies/register', registerLimiter, async (req, res) => {
   }
 });
 
-// ── GET ALL COMPANIES ─────────────────────────────────────
+// FIXED — each admin only sees their own company ✅
 app.get('/api/companies', protect, adminOnly, async (req, res) => {
   try {
+    const company_id = req.user.company_id;
     const result = await pool.query(
       `SELECT c.*, COUNT(u.id) as user_count
        FROM companies c
        LEFT JOIN users u ON u.company_id = c.id
-       GROUP BY c.id ORDER BY c.created_at DESC`
+       WHERE c.id = $1
+       GROUP BY c.id`,
+      [company_id]
     );
     res.json({ success: true, data: result.rows });
   } catch (err) {
