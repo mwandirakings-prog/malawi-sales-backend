@@ -2,6 +2,7 @@ const https = require('https');
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
+const rateLimit = require('express-rate-limit');
 require('dotenv').config();
 const pool = require('./db');
 const { protect, adminOnly, noViewer } = require('./middleware/auth');
@@ -14,6 +15,46 @@ app.use(express.json());
 
 const jwt = require('jsonwebtoken');
 const JWT_SECRET = process.env.JWT_SECRET || 'sabias-secret-key-2026';
+
+// ── RATE LIMITING ─────────────────────────────────────────
+// General limit — 100 requests per 15 minutes per IP
+const generalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    message: 'Too many requests from this device. Please try again in 15 minutes.'
+  }
+});
+
+// Login limit — 10 attempts per 15 minutes per IP
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    message: 'Too many login attempts from this device. Please try again in 15 minutes.'
+  }
+});
+
+// Registration limit — 5 per hour per IP
+const registerLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    message: 'Too many registration attempts. Please try again in 1 hour.'
+  }
+});
+
+// Apply general limit to all API routes
+app.use('/api/', generalLimiter);
 
 // ── ROOT ──────────────────────────────────────────────────
 app.get('/', (req, res) => {
@@ -225,7 +266,7 @@ const notifyAdminStockAlert = async (item, salesperson,
 };
 
 // ── LOGIN ─────────────────────────────────────────────────
-app.post('/api/auth/login', async (req, res) => {
+app.post('/api/auth/login', loginLimiter, async (req, res) => {
   const { email, password } = req.body;
   try {
     const result = await pool.query(
@@ -459,7 +500,7 @@ app.post('/api/auth/reset-password', async (req, res) => {
 });
 
 // ── COMPANY REGISTRATION ──────────────────────────────────
-app.post('/api/companies/register', async (req, res) => {
+app.post('/api/companies/register', registerLimiter, async (req, res) => {
   const { company_name, email, phone, city, address,
           admin_name, password } = req.body;
   const client = await pool.connect();
@@ -646,14 +687,13 @@ app.get('/api/sales', protect, async (req, res) => {
   }
 });
 
-// ── SALES — POST (with auto stock deduction + notification)
+// ── SALES — POST ──────────────────────────────────────────
 app.post('/api/sales', protect, noViewer, async (req, res) => {
   try {
     const company_id = req.user.company_id;
     const { sale_date, product, category, region, customer,
             quantity, unit_price, unit_cost, salesperson, payment } = req.body;
 
-    // 1. Insert the sale record
     const result = await pool.query(
       `INSERT INTO sales
        (sale_date, product, category, region, customer,
@@ -663,7 +703,6 @@ app.post('/api/sales', protect, noViewer, async (req, res) => {
        quantity, unit_price, unit_cost, salesperson, payment, company_id]
     );
 
-    // 2. Auto deduct stock from inventory
     const invResult = await pool.query(
       `UPDATE inventory
        SET quantity_in_stock = GREATEST(quantity_in_stock - $1, 0),
@@ -673,7 +712,6 @@ app.post('/api/sales', protect, noViewer, async (req, res) => {
       [quantity, product, company_id]
     );
 
-    // 3. Send stock alert to company admin if needed
     if (invResult.rows.length > 0) {
       const item = invResult.rows[0];
       const newStock = parseInt(item.quantity_in_stock);
