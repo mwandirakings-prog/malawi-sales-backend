@@ -983,6 +983,205 @@ app.delete('/api/users/:id', protect, adminOnly, async (req, res) => {
   }
 });
 
+// ── SUPER ADMIN MIDDLEWARE ────────────────────────────────
+const superAdminOnly = (req, res, next) => {
+  if (req.user.email !== 'sabiasadmin@gmail.com') {
+    return res.status(403).json({
+      success: false,
+      message: 'Super Admin access required.'
+    });
+  }
+  next();
+};
+
+// ── SUPER ADMIN — GET ALL COMPANIES ──────────────────────
+app.get('/api/superadmin/companies', protect, superAdminOnly,
+  async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT
+        c.id,
+        c.name,
+        c.email,
+        c.phone,
+        c.city,
+        c.country,
+        c.active,
+        c.plan,
+        c.created_at,
+        c.trial_ends_at,
+        c.subscription_status,
+        c.subscription_expires_at,
+        COUNT(u.id) as user_count,
+        NOW() as current_time
+      FROM companies c
+      LEFT JOIN users u ON u.company_id = c.id
+      GROUP BY c.id
+      ORDER BY c.created_at DESC
+    `);
+    res.json({ success: true, data: result.rows });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── SUPER ADMIN — TOGGLE COMPANY ACTIVE ──────────────────
+app.put('/api/superadmin/companies/:id/toggle',
+  protect, superAdminOnly, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await pool.query(
+      `UPDATE companies SET active = NOT active
+       WHERE id = $1 RETURNING *`,
+      [id]
+    );
+    res.json({ success: true, data: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── SUPER ADMIN — EXTEND TRIAL ────────────────────────────
+app.put('/api/superadmin/companies/:id/extend',
+  protect, superAdminOnly, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { days } = req.body;
+    const result = await pool.query(
+      `UPDATE companies
+       SET trial_ends_at = GREATEST(trial_ends_at, NOW())
+         + INTERVAL '1 day' * $1,
+           subscription_status = 'trial',
+           active = true
+       WHERE id = $2 RETURNING *`,
+      [days || 7, id]
+    );
+    res.json({ success: true, data: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── SUPER ADMIN — ACTIVATE SUBSCRIPTION ──────────────────
+app.put('/api/superadmin/companies/:id/activate',
+  protect, superAdminOnly, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { months } = req.body;
+    const expiresAt = new Date();
+    expiresAt.setMonth(expiresAt.getMonth() + (months || 1));
+    const result = await pool.query(
+      `UPDATE companies
+       SET subscription_status = 'active',
+           subscription_expires_at = $1,
+           active = true
+       WHERE id = $2 RETURNING *`,
+      [expiresAt, id]
+    );
+    res.json({ success: true, data: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── SUPER ADMIN — DELETE COMPANY ──────────────────────────
+app.delete('/api/superadmin/companies/:id',
+  protect, superAdminOnly, async (req, res) => {
+  try {
+    const { id } = req.params;
+    // Delete users first then company
+    await pool.query('DELETE FROM users WHERE company_id = $1', [id]);
+    await pool.query('DELETE FROM sales WHERE company_id = $1', [id]);
+    await pool.query('DELETE FROM inventory WHERE company_id = $1', [id]);
+    await pool.query('DELETE FROM companies WHERE id = $1', [id]);
+    res.json({ success: true, message: 'Company deleted successfully' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── TRIAL CHECK — called by frontend on login ─────────────
+app.get('/api/trial/status', protect, async (req, res) => {
+  try {
+    const company_id = req.user.company_id;
+    const result = await pool.query(
+      `SELECT
+         active,
+         trial_ends_at,
+         subscription_status,
+         subscription_expires_at,
+         NOW() as current_time
+       FROM companies WHERE id = $1`,
+      [company_id]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false, message: 'Company not found'
+      });
+    }
+    const company = result.rows[0];
+    const now = new Date();
+    const trialEnd = new Date(company.trial_ends_at);
+    const subEnd = new Date(company.subscription_expires_at);
+    const daysLeftTrial = Math.ceil(
+      (trialEnd - now) / (1000 * 60 * 60 * 24)
+    );
+    const daysLeftSub = company.subscription_expires_at
+      ? Math.ceil((subEnd - now) / (1000 * 60 * 60 * 24))
+      : null;
+
+    let status = 'active';
+    let daysLeft = null;
+    let message = '';
+    let locked = false;
+
+    if (company.subscription_status === 'trial') {
+      if (daysLeftTrial <= 0) {
+        status = 'expired';
+        locked = true;
+        message = 'Your free trial has expired. Contact SABIAS to activate your subscription.';
+      } else if (daysLeftTrial <= 3) {
+        status = 'trial_warning';
+        daysLeft = daysLeftTrial;
+        message = `Your free trial expires in ${daysLeftTrial} day(s)! Contact SABIAS to continue.`;
+      } else {
+        status = 'trial';
+        daysLeft = daysLeftTrial;
+        message = `Free trial — ${daysLeftTrial} day(s) remaining.`;
+      }
+    } else if (company.subscription_status === 'active') {
+      if (daysLeftSub !== null && daysLeftSub <= 0) {
+        status = 'expired';
+        locked = true;
+        message = 'Your subscription has expired. Contact SABIAS to renew.';
+      } else if (daysLeftSub !== null && daysLeftSub <= 3) {
+        status = 'sub_warning';
+        daysLeft = daysLeftSub;
+        message = `Your subscription expires in ${daysLeftSub} day(s)! Contact SABIAS to renew.`;
+      } else {
+        status = 'active';
+        daysLeft = daysLeftSub;
+      }
+    }
+
+    res.json({
+      success: true,
+      data: {
+        status,
+        locked,
+        daysLeft,
+        message,
+        subscription_status: company.subscription_status,
+        trial_ends_at: company.trial_ends_at,
+        subscription_expires_at: company.subscription_expires_at,
+        active: company.active,
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ── GLOBAL ERROR HANDLER ──────────────────────────────────
 app.use((err, req, res, next) => {
   console.error('Unhandled error:', err.message);
