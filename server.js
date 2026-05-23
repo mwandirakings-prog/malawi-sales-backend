@@ -1,6 +1,7 @@
 const https = require('https');
 const express = require('express');
 const cors = require('cors');
+const bcrypt = require('bcryptjs');
 require('dotenv').config();
 const pool = require('./db');
 const { protect, adminOnly, noViewer } = require('./middleware/auth');
@@ -10,6 +11,9 @@ const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json());
+
+const jwt = require('jsonwebtoken');
+const JWT_SECRET = process.env.JWT_SECRET || 'sabias-secret-key-2026';
 
 // ── ROOT ──────────────────────────────────────────────────
 app.get('/', (req, res) => {
@@ -52,9 +56,6 @@ const sendEmail = async (to, subject, html) => {
 };
 
 // ── LOGIN ─────────────────────────────────────────────────
-const jwt = require('jsonwebtoken');
-const JWT_SECRET = process.env.JWT_SECRET || 'sabias-secret-key-2026';
-
 app.post('/api/auth/login', async (req, res) => {
   const { email, password } = req.body;
   try {
@@ -63,17 +64,82 @@ app.post('/api/auth/login', async (req, res) => {
        FROM users u
        LEFT JOIN companies c ON c.id = u.company_id
        WHERE LOWER(u.email) = LOWER($1)
-       AND u.password = $2
        AND u.active = true`,
-      [email, password]
+      [email]
     );
+
     if (result.rows.length === 0) {
       return res.status(401).json({
         success: false,
-        message: 'Invalid email or password or account deactivated.'
+        message: 'Invalid email or password.'
       });
     }
+
     const user = result.rows[0];
+
+    // Check if account is locked
+    if (user.locked_until && new Date(user.locked_until) > new Date()) {
+      const minutesLeft = Math.ceil(
+        (new Date(user.locked_until) - new Date()) / 60000
+      );
+      return res.status(423).json({
+        success: false,
+        message: `Account locked due to too many failed attempts. Try again in ${minutesLeft} minute(s) or reset your password.`
+      });
+    }
+
+    // Check password — supports both bcrypt and plain text (migration period)
+    let passwordMatch = false;
+    if (user.password && user.password.startsWith('$2')) {
+      // Already hashed with bcrypt
+      passwordMatch = await bcrypt.compare(password, user.password);
+    } else {
+      // Plain text — old password before migration
+      passwordMatch = (password === user.password);
+      // Auto-hash on successful plain text login
+      if (passwordMatch) {
+        const hashed = await bcrypt.hash(password, 10);
+        await pool.query(
+          'UPDATE users SET password = $1 WHERE id = $2',
+          [hashed, user.id]
+        );
+      }
+    }
+
+    if (!passwordMatch) {
+      const attempts = (user.login_attempts || 0) + 1;
+
+      if (attempts >= 5) {
+        // Lock account for 30 minutes
+        const lockUntil = new Date(Date.now() + 30 * 60 * 1000);
+        await pool.query(
+          `UPDATE users SET login_attempts = $1, locked_until = $2
+           WHERE id = $3`,
+          [attempts, lockUntil, user.id]
+        );
+        return res.status(423).json({
+          success: false,
+          message: 'Account locked for 30 minutes due to 5 failed login attempts. Please reset your password or try again later.'
+        });
+      } else {
+        await pool.query(
+          'UPDATE users SET login_attempts = $1 WHERE id = $2',
+          [attempts, user.id]
+        );
+        return res.status(401).json({
+          success: false,
+          message: `Invalid email or password. ${5 - attempts} attempt(s) remaining before account is locked.`
+        });
+      }
+    }
+
+    // Login successful — reset attempts and lock
+    await pool.query(
+      `UPDATE users SET login_attempts = 0, locked_until = NULL
+       WHERE id = $1`,
+      [user.id]
+    );
+
     const token = jwt.sign(
       {
         id: user.id,
@@ -85,6 +151,7 @@ app.post('/api/auth/login', async (req, res) => {
       JWT_SECRET,
       { expiresIn: '7d' }
     );
+
     res.json({
       success: true,
       token,
@@ -98,6 +165,7 @@ app.post('/api/auth/login', async (req, res) => {
         company: user.company_name || 'SABIAS',
       }
     });
+
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -107,7 +175,6 @@ app.post('/api/auth/login', async (req, res) => {
 app.post('/api/auth/forgot-password', async (req, res) => {
   const { email } = req.body;
   try {
-    // FIXED — LOWER() for case insensitive match
     const result = await pool.query(
       `SELECT * FROM users
        WHERE LOWER(email) = LOWER($1) AND active = true`,
@@ -131,7 +198,8 @@ app.post('/api/auth/forgot-password', async (req, res) => {
                   Math.random().toString(36).slice(2);
     const expiry = new Date(Date.now() + 60 * 60 * 1000);
     await pool.query(
-      `UPDATE users SET reset_token = $1, reset_token_expiry = $2
+      `UPDATE users SET reset_token = $1, reset_token_expiry = $2,
+       login_attempts = 0, locked_until = NULL
        WHERE LOWER(email) = LOWER($3)`,
       [token, expiry, email]
     );
@@ -143,10 +211,13 @@ app.post('/api/auth/forgot-password', async (req, res) => {
                     text-align:center;margin-bottom:24px;">
           <div style="color:#FFB800;font-size:28px;font-weight:bold;
                       letter-spacing:4px;">SABIAS</div>
+          <div style="color:#FF6B35;font-size:11px;margin-top:4px;">
+            Sales & Business Intelligence Analytics System
+          </div>
         </div>
         <h2 style="color:#3E1F00;margin:0 0 8px;">Password Reset Request</h2>
         <p style="color:#555;font-size:14px;line-height:1.6;">
-          Hi ${user.name}, click below to reset your password.
+          Hi ${user.name}, click below to reset your SABIAS password.
           This link expires in 1 hour.
         </p>
         <div style="background:#3E1F00;border-radius:10px;padding:16px;
@@ -163,16 +234,24 @@ app.post('/api/auth/forgot-password', async (req, res) => {
                       font-weight:bold;">SECURITY NOTICE</div>
           <div style="color:#555;font-size:13px;">
             If you did not request this, please ignore this email.
+            Your password will not change.
           </div>
         </div>
-        <div style="text-align:center;color:#888;font-size:12px;">
+        <p style="color:#888;font-size:12px;">
+          Or copy this link:<br/>
+          <a href="${resetLink}" style="color:#FF6B35;">${resetLink}</a>
+        </p>
+        <div style="text-align:center;color:#888;font-size:12px;margin-top:20px;">
           <strong style="color:#3E1F00;">Kings Mwandira</strong><br/>
           CEO, SABIAS
         </div>
       </div>`;
     sendEmail(email, 'SABIAS Password Reset Request', resetHtml)
       .catch(err => console.error('Reset email error:', err));
-    res.json({ success: true, message: 'Password reset link sent!' });
+    res.json({
+      success: true,
+      message: 'Password reset link sent to your email address.'
+    });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -182,7 +261,6 @@ app.post('/api/auth/forgot-password', async (req, res) => {
 app.post('/api/auth/reset-password', async (req, res) => {
   const { token, password } = req.body;
   try {
-    // FIXED — find user first, then update by id
     const result = await pool.query(
       `SELECT * FROM users
        WHERE reset_token = $1
@@ -197,14 +275,19 @@ app.post('/api/auth/reset-password', async (req, res) => {
       });
     }
     const user = result.rows[0];
-    // Update by id — not by token (token is being cleared!)
+    // Hash the new password before saving
+    const hashedPassword = await bcrypt.hash(password, 10);
     await pool.query(
       `UPDATE users SET password = $1,
-       reset_token = NULL, reset_token_expiry = NULL
+       reset_token = NULL, reset_token_expiry = NULL,
+       login_attempts = 0, locked_until = NULL
        WHERE id = $2`,
-      [password, user.id]
+      [hashedPassword, user.id]
     );
-    res.json({ success: true, message: 'Password reset successfully!' });
+    res.json({
+      success: true,
+      message: 'Password reset successfully! You can now login.'
+    });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -233,11 +316,15 @@ app.post('/api/companies/register', async (req, res) => {
       [company_name, email, phone, city, address]
     );
     const company = compResult.rows[0];
+
+    // Hash password before saving
+    const hashedPassword = await bcrypt.hash(password, 10);
+
     await client.query(
       `INSERT INTO users
        (name, email, password, role, region, company_id, active)
        VALUES ($1,$2,$3,'admin','all',$4, true)`,
-      [admin_name, email, password, company.id]
+      [admin_name, email, hashedPassword, company.id]
     );
     await client.query('COMMIT');
 
@@ -256,7 +343,7 @@ app.post('/api/companies/register', async (req, res) => {
         <p style="color:#555;font-size:15px;line-height:1.6;">
           Welcome to <strong>SABIAS</strong>! Your company
           <strong style="color:#FF6B35;">${company_name}</strong>
-          has been successfully registered.
+          has been successfully registered on our platform.
         </p>
         <div style="background:white;border-radius:10px;padding:20px;
                     margin:20px 0;border-left:4px solid #FF6B35;">
@@ -276,7 +363,7 @@ app.post('/api/companies/register', async (req, res) => {
           </div>
         </div>
         <p style="color:#555;font-size:14px;line-height:1.6;">
-          Login at
+          You can now login at
           <a href="https://www.sabiasanalytics.com"
              style="color:#FF6B35;font-weight:bold;">
             www.sabiasanalytics.com
@@ -290,7 +377,8 @@ app.post('/api/companies/register', async (req, res) => {
             Login to SABIAS
           </a>
         </div>
-        <div style="text-align:center;margin-top:24px;color:#888;font-size:12px;">
+        <div style="text-align:center;margin-top:24px;color:#888;
+                    font-size:12px;">
           <strong style="color:#3E1F00;">Kings Mwandira</strong><br/>
           CEO, SABIAS
         </div>
@@ -308,6 +396,9 @@ app.post('/api/companies/register', async (req, res) => {
           </div>
         </div>
         <h2 style="color:#3E1F00;">New Company Registered!</h2>
+        <p style="color:#555;font-size:14px;">
+          A new business has just joined SABIAS:
+        </p>
         <div style="background:white;border-radius:10px;padding:20px;
                     margin:20px 0;border-left:4px solid #2D6A4F;">
           <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
@@ -326,9 +417,15 @@ app.post('/api/companies/register', async (req, res) => {
             District: <strong>${city}</strong>
           </div>
           <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
+            Address: <strong>${address || 'Not provided'}</strong>
+          </div>
+          <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
             Registered: <strong>${new Date().toLocaleString()}</strong>
           </div>
         </div>
+        <p style="color:#555;font-size:13px;">
+          Call <strong>${phone}</strong> to follow up.
+        </p>
         <div style="text-align:center;margin-top:16px;color:#888;font-size:11px;">
           SABIAS Auto-Notification System
         </div>
@@ -586,11 +683,13 @@ app.post('/api/users', protect, adminOnly, async (req, res) => {
   try {
     const company_id = req.user.company_id;
     const { name, email, password, role, region } = req.body;
+    // Hash password before saving
+    const hashedPassword = await bcrypt.hash(password, 10);
     const result = await pool.query(
       `INSERT INTO users (name, email, password, role, region, company_id)
        VALUES ($1,$2,$3,$4,$5,$6)
        RETURNING id, name, email, role, region, active`,
-      [name, email, password, role, region, company_id]
+      [name, email, hashedPassword, role, region, company_id]
     );
     res.json({ success: true, data: result.rows[0] });
   } catch (err) {
@@ -620,9 +719,13 @@ app.put('/api/users/:id/password', protect, adminOnly, async (req, res) => {
     const company_id = req.user.company_id;
     const { id } = req.params;
     const { password } = req.body;
+    // Hash before saving
+    const hashedPassword = await bcrypt.hash(password, 10);
     await pool.query(
-      'UPDATE users SET password=$1 WHERE id=$2 AND company_id=$3',
-      [password, id, company_id]
+      `UPDATE users SET password=$1,
+       login_attempts=0, locked_until=NULL
+       WHERE id=$2 AND company_id=$3`,
+      [hashedPassword, id, company_id]
     );
     res.json({ success: true, message: 'Password reset successfully' });
   } catch (err) {
