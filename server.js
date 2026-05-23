@@ -55,6 +55,175 @@ const sendEmail = async (to, subject, html) => {
   });
 };
 
+// ── STOCK NOTIFICATION HELPER ─────────────────────────────
+const notifyAdminStockAlert = async (item, salesperson,
+  sale_date, company_id) => {
+  try {
+    const adminResult = await pool.query(
+      `SELECT u.email, u.name, c.name as company_name
+       FROM users u
+       JOIN companies c ON c.id = u.company_id
+       WHERE u.company_id = $1 AND u.role = 'admin'
+       LIMIT 1`,
+      [company_id]
+    );
+    if (adminResult.rows.length === 0) return;
+    const admin = adminResult.rows[0];
+    const newStock = parseInt(item.quantity_in_stock);
+    const reorderLevel = parseInt(item.reorder_level);
+
+    if (newStock === 0) {
+      const html = `
+        <div style="font-family:Arial,sans-serif;max-width:600px;
+                    margin:0 auto;background:#FFF8F0;padding:32px;
+                    border-radius:12px;">
+          <div style="background:#3E1F00;padding:20px 32px;
+                      border-radius:10px;text-align:center;
+                      margin-bottom:24px;">
+            <div style="color:#FFB800;font-size:28px;font-weight:bold;
+                        letter-spacing:4px;">SABIAS</div>
+            <div style="color:#FF6B35;font-size:11px;margin-top:4px;">
+              Stock Alert System
+            </div>
+          </div>
+          <div style="background:#FFEBEE;border-left:4px solid #E53935;
+                      border-radius:10px;padding:20px;margin-bottom:20px;">
+            <div style="color:#C62828;font-size:20px;font-weight:bold;
+                        margin-bottom:8px;">
+              🚨 OUT OF STOCK ALERT
+            </div>
+            <div style="color:#333;font-size:14px;line-height:1.6;">
+              <strong>${item.product}</strong> is now completely
+              out of stock at
+              <strong>${admin.company_name}</strong>.
+              Immediate action required!
+            </div>
+          </div>
+          <div style="background:white;border-radius:10px;padding:20px;
+                      border-left:4px solid #E53935;margin-bottom:16px;">
+            <div style="color:#888;font-size:12px;font-weight:bold;
+                        margin-bottom:12px;">PRODUCT DETAILS</div>
+            <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
+              Product: <strong>${item.product}</strong>
+            </div>
+            <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
+              Category: <strong>${item.category}</strong>
+            </div>
+            <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
+              Current Stock:
+              <strong style="color:#C62828;">0 units</strong>
+            </div>
+            <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
+              Reorder Level:
+              <strong>${reorderLevel} units</strong>
+            </div>
+            <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
+              Supplier: <strong>${item.supplier || 'N/A'}</strong>
+            </div>
+            <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
+              Last Sale by: <strong>${salesperson}</strong>
+            </div>
+            <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
+              Date: <strong>${sale_date}</strong>
+            </div>
+          </div>
+          <div style="background:#3E1F00;border-radius:10px;
+                      padding:16px;text-align:center;margin-bottom:16px;">
+            <div style="color:#FFB800;font-weight:bold;font-size:14px;">
+              Please reorder from ${item.supplier || 'your supplier'}
+              immediately to avoid losing sales!
+            </div>
+          </div>
+          <div style="text-align:center;color:#888;font-size:11px;">
+            SABIAS Auto Stock Alert · ${admin.company_name}
+          </div>
+        </div>`;
+      sendEmail(
+        admin.email,
+        `🚨 OUT OF STOCK: ${item.product} — ${admin.company_name}`,
+        html
+      ).catch(err => console.error('Out of stock email error:', err));
+
+    } else if (newStock <= reorderLevel) {
+      const html = `
+        <div style="font-family:Arial,sans-serif;max-width:600px;
+                    margin:0 auto;background:#FFF8F0;padding:32px;
+                    border-radius:12px;">
+          <div style="background:#3E1F00;padding:20px 32px;
+                      border-radius:10px;text-align:center;
+                      margin-bottom:24px;">
+            <div style="color:#FFB800;font-size:28px;font-weight:bold;
+                        letter-spacing:4px;">SABIAS</div>
+            <div style="color:#FF6B35;font-size:11px;margin-top:4px;">
+              Stock Alert System
+            </div>
+          </div>
+          <div style="background:#FFF8E1;border-left:4px solid #FF8F00;
+                      border-radius:10px;padding:20px;margin-bottom:20px;">
+            <div style="color:#E65100;font-size:20px;font-weight:bold;
+                        margin-bottom:8px;">
+              ⚠️ LOW STOCK ALERT
+            </div>
+            <div style="color:#333;font-size:14px;line-height:1.6;">
+              <strong>${item.product}</strong> is running low at
+              <strong>${admin.company_name}</strong>.
+              Please reorder soon.
+            </div>
+          </div>
+          <div style="background:white;border-radius:10px;padding:20px;
+                      border-left:4px solid #FF8F00;margin-bottom:16px;">
+            <div style="color:#888;font-size:12px;font-weight:bold;
+                        margin-bottom:12px;">PRODUCT DETAILS</div>
+            <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
+              Product: <strong>${item.product}</strong>
+            </div>
+            <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
+              Category: <strong>${item.category}</strong>
+            </div>
+            <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
+              Current Stock:
+              <strong style="color:#E65100;">${newStock} units</strong>
+            </div>
+            <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
+              Reorder Level:
+              <strong>${reorderLevel} units</strong>
+            </div>
+            <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
+              Suggested Order:
+              <strong>${reorderLevel * 2} units</strong>
+            </div>
+            <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
+              Supplier: <strong>${item.supplier || 'N/A'}</strong>
+            </div>
+            <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
+              Last Sale by: <strong>${salesperson}</strong>
+            </div>
+            <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
+              Date: <strong>${sale_date}</strong>
+            </div>
+          </div>
+          <div style="background:#3E1F00;border-radius:10px;
+                      padding:16px;text-align:center;margin-bottom:16px;">
+            <div style="color:#FFB800;font-weight:bold;font-size:14px;">
+              Consider ordering at least ${reorderLevel * 2} units
+              from ${item.supplier || 'your supplier'} soon.
+            </div>
+          </div>
+          <div style="text-align:center;color:#888;font-size:11px;">
+            SABIAS Auto Stock Alert · ${admin.company_name}
+          </div>
+        </div>`;
+      sendEmail(
+        admin.email,
+        `⚠️ LOW STOCK: ${item.product} — ${admin.company_name}`,
+        html
+      ).catch(err => console.error('Low stock email error:', err));
+    }
+  } catch (err) {
+    console.error('Stock notification error:', err.message);
+  }
+};
+
 // ── LOGIN ─────────────────────────────────────────────────
 app.post('/api/auth/login', async (req, res) => {
   const { email, password } = req.body;
@@ -67,14 +236,12 @@ app.post('/api/auth/login', async (req, res) => {
        AND u.active = true`,
       [email]
     );
-
     if (result.rows.length === 0) {
       return res.status(401).json({
         success: false,
         message: 'Invalid email or password.'
       });
     }
-
     const user = result.rows[0];
 
     // Check if account is locked
@@ -84,19 +251,17 @@ app.post('/api/auth/login', async (req, res) => {
       );
       return res.status(423).json({
         success: false,
-        message: `Account locked due to too many failed attempts. Try again in ${minutesLeft} minute(s) or reset your password.`
+        message: `Account locked due to too many failed attempts. ` +
+          `Try again in ${minutesLeft} minute(s) or reset your password.`
       });
     }
 
-    // Check password — supports both bcrypt and plain text (migration period)
+    // Check password — supports bcrypt and plain text
     let passwordMatch = false;
     if (user.password && user.password.startsWith('$2')) {
-      // Already hashed with bcrypt
       passwordMatch = await bcrypt.compare(password, user.password);
     } else {
-      // Plain text — old password before migration
       passwordMatch = (password === user.password);
-      // Auto-hash on successful plain text login
       if (passwordMatch) {
         const hashed = await bcrypt.hash(password, 10);
         await pool.query(
@@ -108,9 +273,7 @@ app.post('/api/auth/login', async (req, res) => {
 
     if (!passwordMatch) {
       const attempts = (user.login_attempts || 0) + 1;
-
       if (attempts >= 5) {
-        // Lock account for 30 minutes
         const lockUntil = new Date(Date.now() + 30 * 60 * 1000);
         await pool.query(
           `UPDATE users SET login_attempts = $1, locked_until = $2
@@ -119,7 +282,8 @@ app.post('/api/auth/login', async (req, res) => {
         );
         return res.status(423).json({
           success: false,
-          message: 'Account locked for 30 minutes due to 5 failed login attempts. Please reset your password or try again later.'
+          message: 'Account locked for 30 minutes due to 5 failed ' +
+            'login attempts. Please reset your password or try again later.'
         });
       } else {
         await pool.query(
@@ -128,12 +292,13 @@ app.post('/api/auth/login', async (req, res) => {
         );
         return res.status(401).json({
           success: false,
-          message: `Invalid email or password. ${5 - attempts} attempt(s) remaining before account is locked.`
+          message: `Invalid email or password. ` +
+            `${5 - attempts} attempt(s) remaining before account is locked.`
         });
       }
     }
 
-    // Login successful — reset attempts and lock
+    // Login successful — reset attempts
     await pool.query(
       `UPDATE users SET login_attempts = 0, locked_until = NULL
        WHERE id = $1`,
@@ -165,13 +330,12 @@ app.post('/api/auth/login', async (req, res) => {
         company: user.company_name || 'SABIAS',
       }
     });
-
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
 });
 
-// ── FORGOT PASSWORD (public) ──────────────────────────────
+// ── FORGOT PASSWORD ───────────────────────────────────────
 app.post('/api/auth/forgot-password', async (req, res) => {
   const { email } = req.body;
   try {
@@ -205,8 +369,9 @@ app.post('/api/auth/forgot-password', async (req, res) => {
     );
     const resetLink = `https://www.sabiasanalytics.com?reset=${token}`;
     const resetHtml = `
-      <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;
-                  background:#FFF8F0;padding:32px;border-radius:12px;">
+      <div style="font-family:Arial,sans-serif;max-width:600px;
+                  margin:0 auto;background:#FFF8F0;padding:32px;
+                  border-radius:12px;">
         <div style="background:#3E1F00;padding:20px 32px;border-radius:10px;
                     text-align:center;margin-bottom:24px;">
           <div style="color:#FFB800;font-size:28px;font-weight:bold;
@@ -241,7 +406,8 @@ app.post('/api/auth/forgot-password', async (req, res) => {
           Or copy this link:<br/>
           <a href="${resetLink}" style="color:#FF6B35;">${resetLink}</a>
         </p>
-        <div style="text-align:center;color:#888;font-size:12px;margin-top:20px;">
+        <div style="text-align:center;color:#888;font-size:12px;
+                    margin-top:20px;">
           <strong style="color:#3E1F00;">Kings Mwandira</strong><br/>
           CEO, SABIAS
         </div>
@@ -257,7 +423,7 @@ app.post('/api/auth/forgot-password', async (req, res) => {
   }
 });
 
-// ── RESET PASSWORD (public) ───────────────────────────────
+// ── RESET PASSWORD ────────────────────────────────────────
 app.post('/api/auth/reset-password', async (req, res) => {
   const { token, password } = req.body;
   try {
@@ -275,7 +441,6 @@ app.post('/api/auth/reset-password', async (req, res) => {
       });
     }
     const user = result.rows[0];
-    // Hash the new password before saving
     const hashedPassword = await bcrypt.hash(password, 10);
     await pool.query(
       `UPDATE users SET password = $1,
@@ -293,7 +458,7 @@ app.post('/api/auth/reset-password', async (req, res) => {
   }
 });
 
-// ── COMPANY REGISTRATION (public) ────────────────────────
+// ── COMPANY REGISTRATION ──────────────────────────────────
 app.post('/api/companies/register', async (req, res) => {
   const { company_name, email, phone, city, address,
           admin_name, password } = req.body;
@@ -316,10 +481,7 @@ app.post('/api/companies/register', async (req, res) => {
       [company_name, email, phone, city, address]
     );
     const company = compResult.rows[0];
-
-    // Hash password before saving
     const hashedPassword = await bcrypt.hash(password, 10);
-
     await client.query(
       `INSERT INTO users
        (name, email, password, role, region, company_id, active)
@@ -329,8 +491,9 @@ app.post('/api/companies/register', async (req, res) => {
     await client.query('COMMIT');
 
     const welcomeHtml = `
-      <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;
-                  background:#FFF8F0;padding:32px;border-radius:12px;">
+      <div style="font-family:Arial,sans-serif;max-width:600px;
+                  margin:0 auto;background:#FFF8F0;padding:32px;
+                  border-radius:12px;">
         <div style="background:#3E1F00;padding:20px 32px;border-radius:10px;
                     text-align:center;margin-bottom:24px;">
           <div style="color:#FFB800;font-size:28px;font-weight:bold;
@@ -385,8 +548,9 @@ app.post('/api/companies/register', async (req, res) => {
       </div>`;
 
     const notifyHtml = `
-      <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;
-                  background:#FFF8F0;padding:32px;border-radius:12px;">
+      <div style="font-family:Arial,sans-serif;max-width:600px;
+                  margin:0 auto;background:#FFF8F0;padding:32px;
+                  border-radius:12px;">
         <div style="background:#3E1F00;padding:20px 32px;border-radius:10px;
                     text-align:center;margin-bottom:24px;">
           <div style="color:#FFB800;font-size:28px;font-weight:bold;
@@ -426,7 +590,8 @@ app.post('/api/companies/register', async (req, res) => {
         <p style="color:#555;font-size:13px;">
           Call <strong>${phone}</strong> to follow up.
         </p>
-        <div style="text-align:center;margin-top:16px;color:#888;font-size:11px;">
+        <div style="text-align:center;margin-top:16px;
+                    color:#888;font-size:11px;">
           SABIAS Auto-Notification System
         </div>
       </div>`;
@@ -466,7 +631,7 @@ app.get('/api/companies', protect, adminOnly, async (req, res) => {
   }
 });
 
-// ── SALES ROUTES ──────────────────────────────────────────
+// ── SALES — GET ───────────────────────────────────────────
 app.get('/api/sales', protect, async (req, res) => {
   try {
     const company_id = req.user.company_id;
@@ -481,11 +646,14 @@ app.get('/api/sales', protect, async (req, res) => {
   }
 });
 
+// ── SALES — POST (with auto stock deduction + notification)
 app.post('/api/sales', protect, noViewer, async (req, res) => {
   try {
     const company_id = req.user.company_id;
     const { sale_date, product, category, region, customer,
             quantity, unit_price, unit_cost, salesperson, payment } = req.body;
+
+    // 1. Insert the sale record
     const result = await pool.query(
       `INSERT INTO sales
        (sale_date, product, category, region, customer,
@@ -494,6 +662,27 @@ app.post('/api/sales', protect, noViewer, async (req, res) => {
       [sale_date, product, category, region, customer,
        quantity, unit_price, unit_cost, salesperson, payment, company_id]
     );
+
+    // 2. Auto deduct stock from inventory
+    const invResult = await pool.query(
+      `UPDATE inventory
+       SET quantity_in_stock = GREATEST(quantity_in_stock - $1, 0),
+           updated_at = NOW()
+       WHERE LOWER(product) = LOWER($2) AND company_id = $3
+       RETURNING *`,
+      [quantity, product, company_id]
+    );
+
+    // 3. Send stock alert to company admin if needed
+    if (invResult.rows.length > 0) {
+      const item = invResult.rows[0];
+      const newStock = parseInt(item.quantity_in_stock);
+      const reorderLevel = parseInt(item.reorder_level);
+      if (newStock === 0 || newStock <= reorderLevel) {
+        notifyAdminStockAlert(item, salesperson, sale_date, company_id);
+      }
+    }
+
     res.json({ success: true, data: result.rows[0] });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -575,7 +764,7 @@ app.get('/api/monthly', protect, async (req, res) => {
   }
 });
 
-// ── INVENTORY ROUTES ──────────────────────────────────────
+// ── INVENTORY SUMMARY ─────────────────────────────────────
 app.get('/api/inventory/summary', protect, async (req, res) => {
   try {
     const company_id = req.user.company_id;
@@ -596,6 +785,7 @@ app.get('/api/inventory/summary', protect, async (req, res) => {
   }
 });
 
+// ── INVENTORY — GET ───────────────────────────────────────
 app.get('/api/inventory', protect, async (req, res) => {
   try {
     const company_id = req.user.company_id;
@@ -610,6 +800,7 @@ app.get('/api/inventory', protect, async (req, res) => {
   }
 });
 
+// ── INVENTORY — POST ──────────────────────────────────────
 app.post('/api/inventory', protect, adminOnly, async (req, res) => {
   try {
     const company_id = req.user.company_id;
@@ -629,6 +820,7 @@ app.post('/api/inventory', protect, adminOnly, async (req, res) => {
   }
 });
 
+// ── INVENTORY — PUT ───────────────────────────────────────
 app.put('/api/inventory/:id', protect, adminOnly, async (req, res) => {
   try {
     const company_id = req.user.company_id;
@@ -649,6 +841,7 @@ app.put('/api/inventory/:id', protect, adminOnly, async (req, res) => {
   }
 });
 
+// ── INVENTORY — DELETE ────────────────────────────────────
 app.delete('/api/inventory/:id', protect, adminOnly, async (req, res) => {
   try {
     const company_id = req.user.company_id;
@@ -663,7 +856,7 @@ app.delete('/api/inventory/:id', protect, adminOnly, async (req, res) => {
   }
 });
 
-// ── USER MANAGEMENT ROUTES ────────────────────────────────
+// ── USERS — GET ───────────────────────────────────────────
 app.get('/api/users', protect, adminOnly, async (req, res) => {
   try {
     const company_id = req.user.company_id;
@@ -679,11 +872,11 @@ app.get('/api/users', protect, adminOnly, async (req, res) => {
   }
 });
 
+// ── USERS — POST ──────────────────────────────────────────
 app.post('/api/users', protect, adminOnly, async (req, res) => {
   try {
     const company_id = req.user.company_id;
     const { name, email, password, role, region } = req.body;
-    // Hash password before saving
     const hashedPassword = await bcrypt.hash(password, 10);
     const result = await pool.query(
       `INSERT INTO users (name, email, password, role, region, company_id)
@@ -697,6 +890,7 @@ app.post('/api/users', protect, adminOnly, async (req, res) => {
   }
 });
 
+// ── USERS — PUT ───────────────────────────────────────────
 app.put('/api/users/:id', protect, adminOnly, async (req, res) => {
   try {
     const company_id = req.user.company_id;
@@ -714,12 +908,12 @@ app.put('/api/users/:id', protect, adminOnly, async (req, res) => {
   }
 });
 
+// ── USERS — RESET PASSWORD ────────────────────────────────
 app.put('/api/users/:id/password', protect, adminOnly, async (req, res) => {
   try {
     const company_id = req.user.company_id;
     const { id } = req.params;
     const { password } = req.body;
-    // Hash before saving
     const hashedPassword = await bcrypt.hash(password, 10);
     await pool.query(
       `UPDATE users SET password=$1,
@@ -733,6 +927,7 @@ app.put('/api/users/:id/password', protect, adminOnly, async (req, res) => {
   }
 });
 
+// ── USERS — DELETE ────────────────────────────────────────
 app.delete('/api/users/:id', protect, adminOnly, async (req, res) => {
   try {
     const company_id = req.user.company_id;
