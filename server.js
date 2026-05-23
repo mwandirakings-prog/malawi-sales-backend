@@ -985,7 +985,7 @@ app.delete('/api/users/:id', protect, adminOnly, async (req, res) => {
 
 // ── SUPER ADMIN MIDDLEWARE ────────────────────────────────
 const superAdminOnly = (req, res, next) => {
-  if (req.user.email !== 'sabiasadmin@gmail.com') {
+  if (req.user.email !== 'sabiascustomercare@gmail.com') {
     return res.status(403).json({
       success: false,
       message: 'Super Admin access required.'
