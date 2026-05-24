@@ -10,14 +10,26 @@ const { protect, adminOnly, noViewer } = require('./middleware/auth');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(cors());
+// ── CORS ──────────────────────────────────────────────────
+app.use(cors({
+  origin: [
+    'https://sabiasanalytics.com',
+    'https://www.sabiasanalytics.com',
+    'https://info.sabiasanalytics.com',
+    'https://sabiasanalytics.netlify.app',
+    'http://localhost:3000'
+  ],
+  methods: ['GET', 'POST', 'PUT', 'DELETE'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true
+}));
+
 app.use(express.json());
 
 const jwt = require('jsonwebtoken');
 const JWT_SECRET = process.env.JWT_SECRET || 'sabias-secret-key-2026';
 
 // ── RATE LIMITING ─────────────────────────────────────────
-// General limit — 100 requests per 15 minutes per IP
 const generalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
@@ -29,7 +41,6 @@ const generalLimiter = rateLimit({
   }
 });
 
-// Login limit — 10 attempts per 15 minutes per IP
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 10,
@@ -41,7 +52,6 @@ const loginLimiter = rateLimit({
   }
 });
 
-// Registration limit — 5 per hour per IP
 const registerLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 5,
@@ -53,7 +63,6 @@ const registerLimiter = rateLimit({
   }
 });
 
-// Apply general limit to all API routes
 app.use('/api/', generalLimiter);
 
 // ── ROOT ──────────────────────────────────────────────────
@@ -131,7 +140,7 @@ const notifyAdminStockAlert = async (item, salesperson,
                       border-radius:10px;padding:20px;margin-bottom:20px;">
             <div style="color:#C62828;font-size:20px;font-weight:bold;
                         margin-bottom:8px;">
-              🚨 OUT OF STOCK ALERT
+              OUT OF STOCK ALERT
             </div>
             <div style="color:#333;font-size:14px;line-height:1.6;">
               <strong>${item.product}</strong> is now completely
@@ -181,7 +190,7 @@ const notifyAdminStockAlert = async (item, salesperson,
         </div>`;
       sendEmail(
         admin.email,
-        `🚨 OUT OF STOCK: ${item.product} — ${admin.company_name}`,
+        `OUT OF STOCK: ${item.product} — ${admin.company_name}`,
         html
       ).catch(err => console.error('Out of stock email error:', err));
 
@@ -203,7 +212,7 @@ const notifyAdminStockAlert = async (item, salesperson,
                       border-radius:10px;padding:20px;margin-bottom:20px;">
             <div style="color:#E65100;font-size:20px;font-weight:bold;
                         margin-bottom:8px;">
-              ⚠️ LOW STOCK ALERT
+              LOW STOCK ALERT
             </div>
             <div style="color:#333;font-size:14px;line-height:1.6;">
               <strong>${item.product}</strong> is running low at
@@ -256,7 +265,7 @@ const notifyAdminStockAlert = async (item, salesperson,
         </div>`;
       sendEmail(
         admin.email,
-        `⚠️ LOW STOCK: ${item.product} — ${admin.company_name}`,
+        `LOW STOCK: ${item.product} — ${admin.company_name}`,
         html
       ).catch(err => console.error('Low stock email error:', err));
     }
@@ -285,7 +294,6 @@ app.post('/api/auth/login', loginLimiter, async (req, res) => {
     }
     const user = result.rows[0];
 
-    // Check if account is locked
     if (user.locked_until && new Date(user.locked_until) > new Date()) {
       const minutesLeft = Math.ceil(
         (new Date(user.locked_until) - new Date()) / 60000
@@ -297,7 +305,6 @@ app.post('/api/auth/login', loginLimiter, async (req, res) => {
       });
     }
 
-    // Check password — supports bcrypt and plain text
     let passwordMatch = false;
     if (user.password && user.password.startsWith('$2')) {
       passwordMatch = await bcrypt.compare(password, user.password);
@@ -339,7 +346,6 @@ app.post('/api/auth/login', loginLimiter, async (req, res) => {
       }
     }
 
-    // Login successful — reset attempts
     await pool.query(
       `UPDATE users SET login_attempts = 0, locked_until = NULL
        WHERE id = $1`,
@@ -657,7 +663,7 @@ app.post('/api/companies/register', registerLimiter, async (req, res) => {
   }
 });
 
-// FIXED — each admin only sees their own company ✅
+// ── GET COMPANIES ─────────────────────────────────────────
 app.get('/api/companies', protect, adminOnly, async (req, res) => {
   try {
     const company_id = req.user.company_id;
@@ -1000,18 +1006,9 @@ app.get('/api/superadmin/companies', protect, superAdminOnly,
   try {
     const result = await pool.query(`
       SELECT
-        c.id,
-        c.name,
-        c.email,
-        c.phone,
-        c.city,
-        c.country,
-        c.active,
-        c.plan,
-        c.created_at,
-        c.trial_ends_at,
-        c.subscription_status,
-        c.subscription_expires_at,
+        c.id, c.name, c.email, c.phone, c.city, c.country,
+        c.active, c.plan, c.created_at, c.trial_ends_at,
+        c.subscription_status, c.subscription_expires_at,
         COUNT(u.id) as user_count,
         NOW() as current_time
       FROM companies c
@@ -1089,7 +1086,6 @@ app.delete('/api/superadmin/companies/:id',
   protect, superAdminOnly, async (req, res) => {
   try {
     const { id } = req.params;
-    // Delete users first then company
     await pool.query('DELETE FROM users WHERE company_id = $1', [id]);
     await pool.query('DELETE FROM sales WHERE company_id = $1', [id]);
     await pool.query('DELETE FROM inventory WHERE company_id = $1', [id]);
@@ -1100,17 +1096,13 @@ app.delete('/api/superadmin/companies/:id',
   }
 });
 
-// ── TRIAL CHECK — called by frontend on login ─────────────
+// ── TRIAL STATUS ──────────────────────────────────────────
 app.get('/api/trial/status', protect, async (req, res) => {
   try {
     const company_id = req.user.company_id;
     const result = await pool.query(
-      `SELECT
-         active,
-         trial_ends_at,
-         subscription_status,
-         subscription_expires_at,
-         NOW() as current_time
+      `SELECT active, trial_ends_at, subscription_status,
+              subscription_expires_at, NOW() as current_time
        FROM companies WHERE id = $1`,
       [company_id]
     );
@@ -1137,40 +1129,31 @@ app.get('/api/trial/status', protect, async (req, res) => {
 
     if (company.subscription_status === 'trial') {
       if (daysLeftTrial <= 0) {
-        status = 'expired';
-        locked = true;
+        status = 'expired'; locked = true;
         message = 'Your free trial has expired. Contact SABIAS to activate your subscription.';
       } else if (daysLeftTrial <= 3) {
-        status = 'trial_warning';
-        daysLeft = daysLeftTrial;
+        status = 'trial_warning'; daysLeft = daysLeftTrial;
         message = `Your free trial expires in ${daysLeftTrial} day(s)! Contact SABIAS to continue.`;
       } else {
-        status = 'trial';
-        daysLeft = daysLeftTrial;
+        status = 'trial'; daysLeft = daysLeftTrial;
         message = `Free trial — ${daysLeftTrial} day(s) remaining.`;
       }
     } else if (company.subscription_status === 'active') {
       if (daysLeftSub !== null && daysLeftSub <= 0) {
-        status = 'expired';
-        locked = true;
+        status = 'expired'; locked = true;
         message = 'Your subscription has expired. Contact SABIAS to renew.';
       } else if (daysLeftSub !== null && daysLeftSub <= 3) {
-        status = 'sub_warning';
-        daysLeft = daysLeftSub;
+        status = 'sub_warning'; daysLeft = daysLeftSub;
         message = `Your subscription expires in ${daysLeftSub} day(s)! Contact SABIAS to renew.`;
       } else {
-        status = 'active';
-        daysLeft = daysLeftSub;
+        status = 'active'; daysLeft = daysLeftSub;
       }
     }
 
     res.json({
       success: true,
       data: {
-        status,
-        locked,
-        daysLeft,
-        message,
+        status, locked, daysLeft, message,
         subscription_status: company.subscription_status,
         trial_ends_at: company.trial_ends_at,
         subscription_expires_at: company.subscription_expires_at,
@@ -1222,7 +1205,6 @@ const apiKeyAuth = async (req, res, next) => {
         limit: 1000
       });
     }
-    // Update usage stats
     await pool.query(
       `UPDATE api_keys
        SET requests_today = requests_today + 1,
@@ -1249,7 +1231,7 @@ const generateApiKey = () => {
   return result;
 };
 
-// ── API KEYS — GET ALL FOR COMPANY ────────────────────────
+// ── API KEYS — GET ────────────────────────────────────────
 app.get('/api/apikeys', protect, adminOnly, async (req, res) => {
   try {
     const company_id = req.user.company_id;
@@ -1257,8 +1239,7 @@ app.get('/api/apikeys', protect, adminOnly, async (req, res) => {
       `SELECT id, name, key_value, active,
               requests_today, requests_total,
               last_used_at, created_at
-       FROM api_keys
-       WHERE company_id = $1
+       FROM api_keys WHERE company_id = $1
        ORDER BY created_at DESC`,
       [company_id]
     );
@@ -1268,13 +1249,11 @@ app.get('/api/apikeys', protect, adminOnly, async (req, res) => {
   }
 });
 
-// ── API KEYS — CREATE NEW KEY ─────────────────────────────
+// ── API KEYS — CREATE ─────────────────────────────────────
 app.post('/api/apikeys', protect, adminOnly, async (req, res) => {
   try {
     const company_id = req.user.company_id;
     const { name } = req.body;
-
-    // Check max 3 keys per company
     const countResult = await pool.query(
       'SELECT COUNT(*) FROM api_keys WHERE company_id = $1 AND active = true',
       [company_id]
@@ -1285,7 +1264,6 @@ app.post('/api/apikeys', protect, adminOnly, async (req, res) => {
         error: 'Maximum of 3 active API keys allowed per company.'
       });
     }
-
     const keyValue = generateApiKey();
     const result = await pool.query(
       `INSERT INTO api_keys (company_id, name, key_value)
@@ -1298,7 +1276,7 @@ app.post('/api/apikeys', protect, adminOnly, async (req, res) => {
   }
 });
 
-// ── API KEYS — REVOKE KEY ─────────────────────────────────
+// ── API KEYS — REVOKE ─────────────────────────────────────
 app.delete('/api/apikeys/:id', protect, adminOnly, async (req, res) => {
   try {
     const company_id = req.user.company_id;
@@ -1314,7 +1292,7 @@ app.delete('/api/apikeys/:id', protect, adminOnly, async (req, res) => {
   }
 });
 
-// ── RESET DAILY COUNTS — runs via cron or manual call ─────
+// ── API KEYS — RESET DAILY COUNTS ────────────────────────
 app.post('/api/apikeys/reset-daily', async (req, res) => {
   try {
     await pool.query('UPDATE api_keys SET requests_today = 0');
@@ -1328,55 +1306,26 @@ app.post('/api/apikeys/reset-daily', async (req, res) => {
 //              PUBLIC API v1 ROUTES
 // ══════════════════════════════════════════════════════════
 
-// ── v1 GET SALES ──────────────────────────────────────────
 app.get('/api/v1/sales', apiKeyAuth, async (req, res) => {
   try {
     const company_id = req.company_id;
     const { limit = 100, page = 1, from, to, product, region } = req.query;
     const offset = (page - 1) * limit;
-
     let query = `SELECT * FROM sales WHERE company_id = $1
                  AND deleted_at IS NULL`;
     const params = [company_id];
     let paramCount = 1;
-
-    if (from) {
-      paramCount++;
-      query += ` AND sale_date >= $${paramCount}`;
-      params.push(from);
-    }
-    if (to) {
-      paramCount++;
-      query += ` AND sale_date <= $${paramCount}`;
-      params.push(to);
-    }
-    if (product) {
-      paramCount++;
-      query += ` AND LOWER(product) LIKE LOWER($${paramCount})`;
-      params.push(`%${product}%`);
-    }
-    if (region) {
-      paramCount++;
-      query += ` AND LOWER(region) = LOWER($${paramCount})`;
-      params.push(region);
-    }
-
-    paramCount++;
-    query += ` ORDER BY sale_date DESC LIMIT $${paramCount}`;
-    params.push(parseInt(limit));
-
-    paramCount++;
-    query += ` OFFSET $${paramCount}`;
-    params.push(parseInt(offset));
-
+    if (from) { paramCount++; query += ` AND sale_date >= $${paramCount}`; params.push(from); }
+    if (to) { paramCount++; query += ` AND sale_date <= $${paramCount}`; params.push(to); }
+    if (product) { paramCount++; query += ` AND LOWER(product) LIKE LOWER($${paramCount})`; params.push(`%${product}%`); }
+    if (region) { paramCount++; query += ` AND LOWER(region) = LOWER($${paramCount})`; params.push(region); }
+    paramCount++; query += ` ORDER BY sale_date DESC LIMIT $${paramCount}`; params.push(parseInt(limit));
+    paramCount++; query += ` OFFSET $${paramCount}`; params.push(parseInt(offset));
     const result = await pool.query(query, params);
     res.json({
-      success: true,
-      count: result.rows.length,
-      page: parseInt(page),
-      limit: parseInt(limit),
-      data: result.rows,
-      api_key: req.apiKey.name,
+      success: true, count: result.rows.length,
+      page: parseInt(page), limit: parseInt(limit),
+      data: result.rows, api_key: req.apiKey.name,
       company: req.apiKey.company_name
     });
   } catch (err) {
@@ -1384,23 +1333,17 @@ app.get('/api/v1/sales', apiKeyAuth, async (req, res) => {
   }
 });
 
-// ── v1 POST SALE ──────────────────────────────────────────
 app.post('/api/v1/sales', apiKeyAuth, async (req, res) => {
   try {
     const company_id = req.company_id;
     const { sale_date, product, category, region, customer,
             quantity, unit_price, unit_cost, salesperson, payment } = req.body;
-
     if (!product || !quantity || !unit_price) {
       return res.status(400).json({
-        success: false,
-        error: 'Required fields missing.',
-        required: ['product', 'quantity', 'unit_price'],
-        optional: ['sale_date', 'category', 'region', 'customer',
-                   'unit_cost', 'salesperson', 'payment']
+        success: false, error: 'Required fields missing.',
+        required: ['product', 'quantity', 'unit_price']
       });
     }
-
     const result = await pool.query(
       `INSERT INTO sales
        (sale_date, product, category, region, customer,
@@ -1412,8 +1355,6 @@ app.post('/api/v1/sales', apiKeyAuth, async (req, res) => {
        parseFloat(unit_cost || 0), salesperson, payment || 'Cash',
        company_id]
     );
-
-    // Auto deduct stock
     await pool.query(
       `UPDATE inventory
        SET quantity_in_stock = GREATEST(quantity_in_stock - $1, 0),
@@ -1421,48 +1362,30 @@ app.post('/api/v1/sales', apiKeyAuth, async (req, res) => {
        WHERE LOWER(product) = LOWER($2) AND company_id = $3`,
       [quantity, product, company_id]
     );
-
     res.json({ success: true, data: result.rows[0] });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// ── v1 GET INVENTORY ──────────────────────────────────────
 app.get('/api/v1/inventory', apiKeyAuth, async (req, res) => {
   try {
     const company_id = req.company_id;
     const { category, low_stock } = req.query;
-
     let query = `SELECT * FROM inventory
                  WHERE company_id = $1 AND deleted_at IS NULL`;
     const params = [company_id];
     let paramCount = 1;
-
-    if (category) {
-      paramCount++;
-      query += ` AND LOWER(category) = LOWER($${paramCount})`;
-      params.push(category);
-    }
-    if (low_stock === 'true') {
-      query += ` AND quantity_in_stock <= reorder_level`;
-    }
-
+    if (category) { paramCount++; query += ` AND LOWER(category) = LOWER($${paramCount})`; params.push(category); }
+    if (low_stock === 'true') { query += ` AND quantity_in_stock <= reorder_level`; }
     query += ` ORDER BY product ASC`;
-
     const result = await pool.query(query, params);
-    res.json({
-      success: true,
-      count: result.rows.length,
-      data: result.rows,
-      company: req.apiKey.company_name
-    });
+    res.json({ success: true, count: result.rows.length, data: result.rows, company: req.apiKey.company_name });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// ── v1 GET KPIs ───────────────────────────────────────────
 app.get('/api/v1/kpis', apiKeyAuth, async (req, res) => {
   try {
     const company_id = req.company_id;
@@ -1474,75 +1397,48 @@ app.get('/api/v1/kpis', apiKeyAuth, async (req, res) => {
         SUM(quantity) AS total_units_sold,
         ROUND(AVG(unit_price), 2) AS avg_unit_price,
         MAX(sale_date) AS last_sale_date
-      FROM sales
-      WHERE company_id = $1
-      AND deleted_at IS NULL
+      FROM sales WHERE company_id = $1 AND deleted_at IS NULL
     `, [company_id]);
-    res.json({
-      success: true,
-      data: result.rows[0],
-      company: req.apiKey.company_name
-    });
+    res.json({ success: true, data: result.rows[0], company: req.apiKey.company_name });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// ── v1 GET CATEGORIES ─────────────────────────────────────
 app.get('/api/v1/categories', apiKeyAuth, async (req, res) => {
   try {
     const company_id = req.company_id;
     const result = await pool.query(`
-      SELECT
-        category,
+      SELECT category,
         SUM(quantity * unit_price) AS revenue,
         SUM(quantity * unit_price - quantity * unit_cost) AS profit,
-        COUNT(*) AS transactions,
-        SUM(quantity) AS units_sold
-      FROM sales
-      WHERE company_id = $1 AND deleted_at IS NULL
-      GROUP BY category
-      ORDER BY revenue DESC
+        COUNT(*) AS transactions, SUM(quantity) AS units_sold
+      FROM sales WHERE company_id = $1 AND deleted_at IS NULL
+      GROUP BY category ORDER BY revenue DESC
     `, [company_id]);
-    res.json({
-      success: true,
-      count: result.rows.length,
-      data: result.rows,
-      company: req.apiKey.company_name
-    });
+    res.json({ success: true, count: result.rows.length, data: result.rows, company: req.apiKey.company_name });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// ── v1 GET REGIONS ────────────────────────────────────────
 app.get('/api/v1/regions', apiKeyAuth, async (req, res) => {
   try {
     const company_id = req.company_id;
     const result = await pool.query(`
-      SELECT
-        region,
+      SELECT region,
         SUM(quantity * unit_price) AS revenue,
         SUM(quantity * unit_price - quantity * unit_cost) AS profit,
-        COUNT(*) AS transactions,
-        SUM(quantity) AS units_sold
-      FROM sales
-      WHERE company_id = $1 AND deleted_at IS NULL
-      GROUP BY region
-      ORDER BY revenue DESC
+        COUNT(*) AS transactions, SUM(quantity) AS units_sold
+      FROM sales WHERE company_id = $1 AND deleted_at IS NULL
+      GROUP BY region ORDER BY revenue DESC
     `, [company_id]);
-    res.json({
-      success: true,
-      count: result.rows.length,
-      data: result.rows,
-      company: req.apiKey.company_name
-    });
+    res.json({ success: true, count: result.rows.length, data: result.rows, company: req.apiKey.company_name });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// ── v1 GET MONTHLY TREND ──────────────────────────────────
 app.get('/api/v1/monthly', apiKeyAuth, async (req, res) => {
   try {
     const company_id = req.company_id;
@@ -1552,23 +1448,16 @@ app.get('/api/v1/monthly', apiKeyAuth, async (req, res) => {
         SUM(quantity * unit_price) AS revenue,
         SUM(quantity * unit_price - quantity * unit_cost) AS profit,
         COUNT(*) AS transactions
-      FROM sales
-      WHERE company_id = $1 AND deleted_at IS NULL
+      FROM sales WHERE company_id = $1 AND deleted_at IS NULL
       GROUP BY TO_CHAR(sale_date, 'YYYY-MM')
       ORDER BY month ASC
     `, [company_id]);
-    res.json({
-      success: true,
-      count: result.rows.length,
-      data: result.rows,
-      company: req.apiKey.company_name
-    });
+    res.json({ success: true, count: result.rows.length, data: result.rows, company: req.apiKey.company_name });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// ── v1 API INFO ───────────────────────────────────────────
 app.get('/api/v1', apiKeyAuth, async (req, res) => {
   res.json({
     success: true,
@@ -1579,20 +1468,20 @@ app.get('/api/v1', apiKeyAuth, async (req, res) => {
     requests_total: req.apiKey.requests_total,
     daily_limit: 1000,
     endpoints: {
-      'GET /api/v1/sales': 'Get all sales. Filters: from, to, product, region, limit, page',
+      'GET /api/v1/sales': 'Get all sales',
       'POST /api/v1/sales': 'Record a new sale',
-      'GET /api/v1/inventory': 'Get all products. Filters: category, low_stock=true',
+      'GET /api/v1/inventory': 'Get all products',
       'GET /api/v1/kpis': 'Get revenue and profit totals',
-      'GET /api/v1/categories': 'Get sales grouped by category',
-      'GET /api/v1/regions': 'Get sales grouped by branch or region',
-      'GET /api/v1/monthly': 'Get monthly revenue and profit trend',
+      'GET /api/v1/categories': 'Sales by category',
+      'GET /api/v1/regions': 'Sales by region',
+      'GET /api/v1/monthly': 'Monthly revenue trend',
     },
-    documentation: 'https://info.sabiasanalytics.com/api',
+    documentation: 'https://info.sabiasanalytics.com/api-docs.html',
     support: 'sabiascustomercare@gmail.com'
   });
 });
 
-// ── SUPER ADMIN — GET API KEYS FOR A COMPANY ─────────────
+// ── SUPER ADMIN — GET API KEYS FOR COMPANY ────────────────
 app.get('/api/superadmin/companies/:id/apikeys',
   protect, superAdminOnly, async (req, res) => {
   try {
