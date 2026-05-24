@@ -1182,6 +1182,416 @@ app.get('/api/trial/status', protect, async (req, res) => {
   }
 });
 
+// ── API KEY MIDDLEWARE ────────────────────────────────────
+const apiKeyAuth = async (req, res, next) => {
+  try {
+    const authHeader = req.headers['authorization'];
+    if (!authHeader || !authHeader.startsWith('Bearer sk_live_sabias_')) {
+      return res.status(401).json({
+        success: false,
+        error: 'Invalid or missing API key.',
+        hint: 'Include your API key in the Authorization header: Bearer sk_live_sabias_xxxx'
+      });
+    }
+    const keyValue = authHeader.replace('Bearer ', '').trim();
+    const result = await pool.query(
+      `SELECT ak.*, c.name as company_name, c.active as company_active
+       FROM api_keys ak
+       JOIN companies c ON c.id = ak.company_id
+       WHERE ak.key_value = $1 AND ak.active = true`,
+      [keyValue]
+    );
+    if (result.rows.length === 0) {
+      return res.status(401).json({
+        success: false,
+        error: 'API key not found or has been revoked.'
+      });
+    }
+    const apiKey = result.rows[0];
+    if (!apiKey.company_active) {
+      return res.status(403).json({
+        success: false,
+        error: 'Your company account is inactive. Contact SABIAS support.'
+      });
+    }
+    if (apiKey.requests_today >= 1000) {
+      return res.status(429).json({
+        success: false,
+        error: 'Daily request limit reached (1000/day). Limit resets at midnight.',
+        requests_today: apiKey.requests_today,
+        limit: 1000
+      });
+    }
+    // Update usage stats
+    await pool.query(
+      `UPDATE api_keys
+       SET requests_today = requests_today + 1,
+           requests_total = requests_total + 1,
+           last_used_at = NOW()
+       WHERE id = $1`,
+      [apiKey.id]
+    );
+    req.apiKey = apiKey;
+    req.company_id = apiKey.company_id;
+    next();
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+// ── GENERATE API KEY HELPER ───────────────────────────────
+const generateApiKey = () => {
+  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  let result = 'sk_live_sabias_';
+  for (let i = 0; i < 24; i++) {
+    result += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return result;
+};
+
+// ── API KEYS — GET ALL FOR COMPANY ────────────────────────
+app.get('/api/apikeys', protect, adminOnly, async (req, res) => {
+  try {
+    const company_id = req.user.company_id;
+    const result = await pool.query(
+      `SELECT id, name, key_value, active,
+              requests_today, requests_total,
+              last_used_at, created_at
+       FROM api_keys
+       WHERE company_id = $1
+       ORDER BY created_at DESC`,
+      [company_id]
+    );
+    res.json({ success: true, data: result.rows });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── API KEYS — CREATE NEW KEY ─────────────────────────────
+app.post('/api/apikeys', protect, adminOnly, async (req, res) => {
+  try {
+    const company_id = req.user.company_id;
+    const { name } = req.body;
+
+    // Check max 3 keys per company
+    const countResult = await pool.query(
+      'SELECT COUNT(*) FROM api_keys WHERE company_id = $1 AND active = true',
+      [company_id]
+    );
+    if (parseInt(countResult.rows[0].count) >= 3) {
+      return res.status(400).json({
+        success: false,
+        error: 'Maximum of 3 active API keys allowed per company.'
+      });
+    }
+
+    const keyValue = generateApiKey();
+    const result = await pool.query(
+      `INSERT INTO api_keys (company_id, name, key_value)
+       VALUES ($1, $2, $3) RETURNING *`,
+      [company_id, name || 'My API Key', keyValue]
+    );
+    res.json({ success: true, data: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── API KEYS — REVOKE KEY ─────────────────────────────────
+app.delete('/api/apikeys/:id', protect, adminOnly, async (req, res) => {
+  try {
+    const company_id = req.user.company_id;
+    const { id } = req.params;
+    await pool.query(
+      `UPDATE api_keys SET active = false
+       WHERE id = $1 AND company_id = $2`,
+      [id, company_id]
+    );
+    res.json({ success: true, message: 'API key revoked successfully.' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── RESET DAILY COUNTS — runs via cron or manual call ─────
+app.post('/api/apikeys/reset-daily', async (req, res) => {
+  try {
+    await pool.query('UPDATE api_keys SET requests_today = 0');
+    res.json({ success: true, message: 'Daily counts reset.' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ══════════════════════════════════════════════════════════
+//              PUBLIC API v1 ROUTES
+// ══════════════════════════════════════════════════════════
+
+// ── v1 GET SALES ──────────────────────────────────────────
+app.get('/api/v1/sales', apiKeyAuth, async (req, res) => {
+  try {
+    const company_id = req.company_id;
+    const { limit = 100, page = 1, from, to, product, region } = req.query;
+    const offset = (page - 1) * limit;
+
+    let query = `SELECT * FROM sales WHERE company_id = $1
+                 AND deleted_at IS NULL`;
+    const params = [company_id];
+    let paramCount = 1;
+
+    if (from) {
+      paramCount++;
+      query += ` AND sale_date >= $${paramCount}`;
+      params.push(from);
+    }
+    if (to) {
+      paramCount++;
+      query += ` AND sale_date <= $${paramCount}`;
+      params.push(to);
+    }
+    if (product) {
+      paramCount++;
+      query += ` AND LOWER(product) LIKE LOWER($${paramCount})`;
+      params.push(`%${product}%`);
+    }
+    if (region) {
+      paramCount++;
+      query += ` AND LOWER(region) = LOWER($${paramCount})`;
+      params.push(region);
+    }
+
+    paramCount++;
+    query += ` ORDER BY sale_date DESC LIMIT $${paramCount}`;
+    params.push(parseInt(limit));
+
+    paramCount++;
+    query += ` OFFSET $${paramCount}`;
+    params.push(parseInt(offset));
+
+    const result = await pool.query(query, params);
+    res.json({
+      success: true,
+      count: result.rows.length,
+      page: parseInt(page),
+      limit: parseInt(limit),
+      data: result.rows,
+      api_key: req.apiKey.name,
+      company: req.apiKey.company_name
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── v1 POST SALE ──────────────────────────────────────────
+app.post('/api/v1/sales', apiKeyAuth, async (req, res) => {
+  try {
+    const company_id = req.company_id;
+    const { sale_date, product, category, region, customer,
+            quantity, unit_price, unit_cost, salesperson, payment } = req.body;
+
+    if (!product || !quantity || !unit_price) {
+      return res.status(400).json({
+        success: false,
+        error: 'Required fields missing.',
+        required: ['product', 'quantity', 'unit_price'],
+        optional: ['sale_date', 'category', 'region', 'customer',
+                   'unit_cost', 'salesperson', 'payment']
+      });
+    }
+
+    const result = await pool.query(
+      `INSERT INTO sales
+       (sale_date, product, category, region, customer,
+        quantity, unit_price, unit_cost, salesperson, payment, company_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
+      [sale_date || new Date().toISOString().split('T')[0],
+       product, category, region, customer,
+       parseInt(quantity), parseFloat(unit_price),
+       parseFloat(unit_cost || 0), salesperson, payment || 'Cash',
+       company_id]
+    );
+
+    // Auto deduct stock
+    await pool.query(
+      `UPDATE inventory
+       SET quantity_in_stock = GREATEST(quantity_in_stock - $1, 0),
+           updated_at = NOW()
+       WHERE LOWER(product) = LOWER($2) AND company_id = $3`,
+      [quantity, product, company_id]
+    );
+
+    res.json({ success: true, data: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── v1 GET INVENTORY ──────────────────────────────────────
+app.get('/api/v1/inventory', apiKeyAuth, async (req, res) => {
+  try {
+    const company_id = req.company_id;
+    const { category, low_stock } = req.query;
+
+    let query = `SELECT * FROM inventory
+                 WHERE company_id = $1 AND deleted_at IS NULL`;
+    const params = [company_id];
+    let paramCount = 1;
+
+    if (category) {
+      paramCount++;
+      query += ` AND LOWER(category) = LOWER($${paramCount})`;
+      params.push(category);
+    }
+    if (low_stock === 'true') {
+      query += ` AND quantity_in_stock <= reorder_level`;
+    }
+
+    query += ` ORDER BY product ASC`;
+
+    const result = await pool.query(query, params);
+    res.json({
+      success: true,
+      count: result.rows.length,
+      data: result.rows,
+      company: req.apiKey.company_name
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── v1 GET KPIs ───────────────────────────────────────────
+app.get('/api/v1/kpis', apiKeyAuth, async (req, res) => {
+  try {
+    const company_id = req.company_id;
+    const result = await pool.query(`
+      SELECT
+        SUM(quantity * unit_price) AS total_revenue,
+        SUM(quantity * unit_price - quantity * unit_cost) AS total_profit,
+        COUNT(*) AS total_transactions,
+        SUM(quantity) AS total_units_sold,
+        ROUND(AVG(unit_price), 2) AS avg_unit_price,
+        MAX(sale_date) AS last_sale_date
+      FROM sales
+      WHERE company_id = $1
+      AND deleted_at IS NULL
+    `, [company_id]);
+    res.json({
+      success: true,
+      data: result.rows[0],
+      company: req.apiKey.company_name
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── v1 GET CATEGORIES ─────────────────────────────────────
+app.get('/api/v1/categories', apiKeyAuth, async (req, res) => {
+  try {
+    const company_id = req.company_id;
+    const result = await pool.query(`
+      SELECT
+        category,
+        SUM(quantity * unit_price) AS revenue,
+        SUM(quantity * unit_price - quantity * unit_cost) AS profit,
+        COUNT(*) AS transactions,
+        SUM(quantity) AS units_sold
+      FROM sales
+      WHERE company_id = $1 AND deleted_at IS NULL
+      GROUP BY category
+      ORDER BY revenue DESC
+    `, [company_id]);
+    res.json({
+      success: true,
+      count: result.rows.length,
+      data: result.rows,
+      company: req.apiKey.company_name
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── v1 GET REGIONS ────────────────────────────────────────
+app.get('/api/v1/regions', apiKeyAuth, async (req, res) => {
+  try {
+    const company_id = req.company_id;
+    const result = await pool.query(`
+      SELECT
+        region,
+        SUM(quantity * unit_price) AS revenue,
+        SUM(quantity * unit_price - quantity * unit_cost) AS profit,
+        COUNT(*) AS transactions,
+        SUM(quantity) AS units_sold
+      FROM sales
+      WHERE company_id = $1 AND deleted_at IS NULL
+      GROUP BY region
+      ORDER BY revenue DESC
+    `, [company_id]);
+    res.json({
+      success: true,
+      count: result.rows.length,
+      data: result.rows,
+      company: req.apiKey.company_name
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── v1 GET MONTHLY TREND ──────────────────────────────────
+app.get('/api/v1/monthly', apiKeyAuth, async (req, res) => {
+  try {
+    const company_id = req.company_id;
+    const result = await pool.query(`
+      SELECT
+        TO_CHAR(sale_date, 'YYYY-MM') AS month,
+        SUM(quantity * unit_price) AS revenue,
+        SUM(quantity * unit_price - quantity * unit_cost) AS profit,
+        COUNT(*) AS transactions
+      FROM sales
+      WHERE company_id = $1 AND deleted_at IS NULL
+      GROUP BY TO_CHAR(sale_date, 'YYYY-MM')
+      ORDER BY month ASC
+    `, [company_id]);
+    res.json({
+      success: true,
+      count: result.rows.length,
+      data: result.rows,
+      company: req.apiKey.company_name
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── v1 API INFO ───────────────────────────────────────────
+app.get('/api/v1', apiKeyAuth, async (req, res) => {
+  res.json({
+    success: true,
+    message: 'Welcome to SABIAS Public API v1',
+    company: req.apiKey.company_name,
+    api_key_name: req.apiKey.name,
+    requests_today: req.apiKey.requests_today,
+    requests_total: req.apiKey.requests_total,
+    daily_limit: 1000,
+    endpoints: {
+      'GET /api/v1/sales': 'Get all sales. Filters: from, to, product, region, limit, page',
+      'POST /api/v1/sales': 'Record a new sale',
+      'GET /api/v1/inventory': 'Get all products. Filters: category, low_stock=true',
+      'GET /api/v1/kpis': 'Get revenue and profit totals',
+      'GET /api/v1/categories': 'Get sales grouped by category',
+      'GET /api/v1/regions': 'Get sales grouped by branch or region',
+      'GET /api/v1/monthly': 'Get monthly revenue and profit trend',
+    },
+    documentation: 'https://info.sabiasanalytics.com/api',
+    support: 'sabiascustomercare@gmail.com'
+  });
+});
+
 // ── GLOBAL ERROR HANDLER ──────────────────────────────────
 app.use((err, req, res, next) => {
   console.error('Unhandled error:', err.message);
