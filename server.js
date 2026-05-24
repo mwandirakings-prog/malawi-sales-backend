@@ -1592,6 +1592,25 @@ app.get('/api/v1', apiKeyAuth, async (req, res) => {
   });
 });
 
+// ── SUPER ADMIN — GET API KEYS FOR A COMPANY ─────────────
+app.get('/api/superadmin/companies/:id/apikeys',
+  protect, superAdminOnly, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await pool.query(
+      `SELECT id, name, key_value, active,
+              requests_today, requests_total,
+              last_used_at, created_at
+       FROM api_keys WHERE company_id = $1
+       ORDER BY created_at DESC`,
+      [id]
+    );
+    res.json({ success: true, data: result.rows });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ── GLOBAL ERROR HANDLER ──────────────────────────────────
 app.use((err, req, res, next) => {
   console.error('Unhandled error:', err.message);
