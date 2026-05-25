@@ -274,6 +274,97 @@ const notifyAdminStockAlert = async (item, salesperson,
   }
 };
 
+// ── ONEKHUSA CONFIG ───────────────────────────────────────
+const ONEKHUSA_API_KEY = 'sandbox_f-PrOegkW-QjWN2-A_alYFw0IB0MICWdIQ';
+const ONEKHUSA_API_SECRET = 'hcobckO0A1DMvbBz_3FfwoOicW4f8QM6NtHyFlaNHfhYFWmNK4XUyjuolb_s';
+const ONEKHUSA_ORG_ID = 'Y7VGV77AJDZ6';
+const ONEKHUSA_MERCHANT = 78487105;
+
+const PLAN_PRICES = {
+  starter:      { monthly: 5000,  name: 'Starter' },
+  professional: { monthly: 10000, name: 'Professional' },
+  enterprise:   { monthly: 50000, name: 'Enterprise' }
+};
+
+const generateReference = () => {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  let ref = 'SAB';
+  for (let i = 0; i < 10; i++) {
+    ref += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return ref;
+};
+
+// ── TRANSACTION LIMIT MIDDLEWARE ──────────────────────────
+const checkTransactionLimit = async (req, res, next) => {
+  try {
+    const company_id = req.user
+      ? req.user.company_id
+      : req.company_id;
+
+    const result = await pool.query(
+      `SELECT subscription_status, subscription_expires_at,
+              trial_ends_at, daily_sales_count, daily_sales_date
+       FROM companies WHERE id = $1`,
+      [company_id]
+    );
+    if (result.rows.length === 0) return next();
+    const company = result.rows[0];
+    const now = new Date();
+
+    const trialEnd = new Date(company.trial_ends_at);
+    const subEnd = company.subscription_expires_at
+      ? new Date(company.subscription_expires_at) : null;
+
+    const trialActive = company.subscription_status === 'trial'
+      && trialEnd > now;
+    const subActive = company.subscription_status === 'active'
+      && subEnd && subEnd > now;
+
+    // Full access — no limit applied
+    if (trialActive || subActive) return next();
+
+    // Reset count if new day
+    const today = new Date().toISOString().split('T')[0];
+    const lastDate = company.daily_sales_date
+      ? new Date(company.daily_sales_date).toISOString().split('T')[0]
+      : null;
+
+    if (lastDate !== today) {
+      await pool.query(
+        `UPDATE companies SET daily_sales_count = 0,
+         daily_sales_date = CURRENT_DATE WHERE id = $1`,
+        [company_id]
+      );
+      company.daily_sales_count = 0;
+    }
+
+    if (company.daily_sales_count >= 10) {
+      return res.status(429).json({
+        success: false,
+        limited: true,
+        message: 'Daily limit of 10 transactions reached. Subscribe to SABIAS for unlimited transactions.',
+        daily_count: company.daily_sales_count,
+        daily_limit: 10
+      });
+    }
+
+    // Increment count
+    await pool.query(
+      `UPDATE companies
+       SET daily_sales_count = daily_sales_count + 1,
+           daily_sales_date = CURRENT_DATE
+       WHERE id = $1`,
+      [company_id]
+    );
+
+    next();
+  } catch (err) {
+    console.error('Transaction limit error:', err.message);
+    next();
+  }
+};
+
 // ── LOGIN ─────────────────────────────────────────────────
 app.post('/api/auth/login', loginLimiter, async (req, res) => {
   const { email, password } = req.body;
@@ -696,8 +787,9 @@ app.get('/api/sales', protect, async (req, res) => {
   }
 });
 
-// ── SALES — POST ──────────────────────────────────────────
-app.post('/api/sales', protect, noViewer, async (req, res) => {
+// ── SALES — POST (with daily limit check) ─────────────────
+app.post('/api/sales', protect, noViewer, checkTransactionLimit,
+  async (req, res) => {
   try {
     const company_id = req.user.company_id;
     const { sale_date, product, category, region, customer,
@@ -1102,7 +1194,8 @@ app.get('/api/trial/status', protect, async (req, res) => {
     const company_id = req.user.company_id;
     const result = await pool.query(
       `SELECT active, trial_ends_at, subscription_status,
-              subscription_expires_at, NOW() as current_time
+              subscription_expires_at, daily_sales_count,
+              daily_sales_date, NOW() as current_time
        FROM companies WHERE id = $1`,
       [company_id]
     );
@@ -1114,46 +1207,66 @@ app.get('/api/trial/status', protect, async (req, res) => {
     const company = result.rows[0];
     const now = new Date();
     const trialEnd = new Date(company.trial_ends_at);
-    const subEnd = new Date(company.subscription_expires_at);
+    const subEnd = company.subscription_expires_at
+      ? new Date(company.subscription_expires_at) : null;
     const daysLeftTrial = Math.ceil(
       (trialEnd - now) / (1000 * 60 * 60 * 24)
     );
-    const daysLeftSub = company.subscription_expires_at
+    const daysLeftSub = subEnd
       ? Math.ceil((subEnd - now) / (1000 * 60 * 60 * 24))
       : null;
+
+    const today = new Date().toISOString().split('T')[0];
+    const lastDate = company.daily_sales_date
+      ? new Date(company.daily_sales_date).toISOString().split('T')[0]
+      : null;
+    const dailyCount = lastDate !== today
+      ? 0 : (company.daily_sales_count || 0);
 
     let status = 'active';
     let daysLeft = null;
     let message = '';
-    let locked = false;
+    let limited = false;
 
     if (company.subscription_status === 'trial') {
       if (daysLeftTrial <= 0) {
-        status = 'expired'; locked = true;
-        message = 'Your free trial has expired. Contact SABIAS to activate your subscription.';
+        status = 'limited';
+        limited = true;
+        message = `Free trial ended. You have ${Math.max(0, 10 - dailyCount)} transactions left today. Subscribe for unlimited access.`;
       } else if (daysLeftTrial <= 3) {
-        status = 'trial_warning'; daysLeft = daysLeftTrial;
-        message = `Your free trial expires in ${daysLeftTrial} day(s)! Contact SABIAS to continue.`;
+        status = 'trial_warning';
+        daysLeft = daysLeftTrial;
+        message = `Trial expires in ${daysLeftTrial} day(s)! Subscribe to keep unlimited access.`;
       } else {
-        status = 'trial'; daysLeft = daysLeftTrial;
+        status = 'trial';
+        daysLeft = daysLeftTrial;
         message = `Free trial — ${daysLeftTrial} day(s) remaining.`;
       }
     } else if (company.subscription_status === 'active') {
       if (daysLeftSub !== null && daysLeftSub <= 0) {
-        status = 'expired'; locked = true;
-        message = 'Your subscription has expired. Contact SABIAS to renew.';
+        status = 'limited';
+        limited = true;
+        message = `Subscription ended. You have ${Math.max(0, 10 - dailyCount)} transactions left today. Renew to restore unlimited access.`;
       } else if (daysLeftSub !== null && daysLeftSub <= 3) {
-        status = 'sub_warning'; daysLeft = daysLeftSub;
-        message = `Your subscription expires in ${daysLeftSub} day(s)! Contact SABIAS to renew.`;
+        status = 'sub_warning';
+        daysLeft = daysLeftSub;
+        message = `Subscription expires in ${daysLeftSub} day(s)! Renew to avoid limits.`;
       } else {
-        status = 'active'; daysLeft = daysLeftSub;
+        status = 'active';
+        daysLeft = daysLeftSub;
       }
     }
 
     res.json({
       success: true,
       data: {
-        status, locked, daysLeft, message,
+        status,
+        limited,
+        daysLeft,
+        message,
+        dailyCount,
+        dailyLimit: 10,
+        remaining: limited ? Math.max(0, 10 - dailyCount) : 'unlimited',
         subscription_status: company.subscription_status,
         trial_ends_at: company.trial_ends_at,
         subscription_expires_at: company.subscription_expires_at,
@@ -1303,7 +1416,7 @@ app.post('/api/apikeys/reset-daily', async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════════
-//              PUBLIC API v1 ROUTES
+//  PUBLIC API v1
 // ══════════════════════════════════════════════════════════
 
 app.get('/api/v1/sales', apiKeyAuth, async (req, res) => {
@@ -1311,29 +1424,27 @@ app.get('/api/v1/sales', apiKeyAuth, async (req, res) => {
     const company_id = req.company_id;
     const { limit = 100, page = 1, from, to, product, region } = req.query;
     const offset = (page - 1) * limit;
-    let query = `SELECT * FROM sales WHERE company_id = $1
-                 AND deleted_at IS NULL`;
+    let query = `SELECT * FROM sales WHERE company_id = $1`;
     const params = [company_id];
-    let paramCount = 1;
-    if (from) { paramCount++; query += ` AND sale_date >= $${paramCount}`; params.push(from); }
-    if (to) { paramCount++; query += ` AND sale_date <= $${paramCount}`; params.push(to); }
-    if (product) { paramCount++; query += ` AND LOWER(product) LIKE LOWER($${paramCount})`; params.push(`%${product}%`); }
-    if (region) { paramCount++; query += ` AND LOWER(region) = LOWER($${paramCount})`; params.push(region); }
-    paramCount++; query += ` ORDER BY sale_date DESC LIMIT $${paramCount}`; params.push(parseInt(limit));
-    paramCount++; query += ` OFFSET $${paramCount}`; params.push(parseInt(offset));
+    let p = 1;
+    if (from) { p++; query += ` AND sale_date >= $${p}`; params.push(from); }
+    if (to) { p++; query += ` AND sale_date <= $${p}`; params.push(to); }
+    if (product) { p++; query += ` AND LOWER(product) LIKE LOWER($${p})`; params.push(`%${product}%`); }
+    if (region) { p++; query += ` AND LOWER(region) = LOWER($${p})`; params.push(region); }
+    p++; query += ` ORDER BY sale_date DESC LIMIT $${p}`; params.push(parseInt(limit));
+    p++; query += ` OFFSET $${p}`; params.push(parseInt(offset));
     const result = await pool.query(query, params);
-    res.json({
-      success: true, count: result.rows.length,
+    res.json({ success: true, count: result.rows.length,
       page: parseInt(page), limit: parseInt(limit),
-      data: result.rows, api_key: req.apiKey.name,
-      company: req.apiKey.company_name
-    });
+      data: result.rows, company: req.apiKey.company_name });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-app.post('/api/v1/sales', apiKeyAuth, async (req, res) => {
+// ── v1 POST SALE (with daily limit) ──────────────────────
+app.post('/api/v1/sales', apiKeyAuth, checkTransactionLimit,
+  async (req, res) => {
   try {
     const company_id = req.company_id;
     const { sale_date, product, category, region, customer,
@@ -1372,15 +1483,15 @@ app.get('/api/v1/inventory', apiKeyAuth, async (req, res) => {
   try {
     const company_id = req.company_id;
     const { category, low_stock } = req.query;
-    let query = `SELECT * FROM inventory
-                 WHERE company_id = $1 AND deleted_at IS NULL`;
+    let query = `SELECT * FROM inventory WHERE company_id = $1`;
     const params = [company_id];
-    let paramCount = 1;
-    if (category) { paramCount++; query += ` AND LOWER(category) = LOWER($${paramCount})`; params.push(category); }
+    let p = 1;
+    if (category) { p++; query += ` AND LOWER(category) = LOWER($${p})`; params.push(category); }
     if (low_stock === 'true') { query += ` AND quantity_in_stock <= reorder_level`; }
     query += ` ORDER BY product ASC`;
     const result = await pool.query(query, params);
-    res.json({ success: true, count: result.rows.length, data: result.rows, company: req.apiKey.company_name });
+    res.json({ success: true, count: result.rows.length,
+      data: result.rows, company: req.apiKey.company_name });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -1388,18 +1499,17 @@ app.get('/api/v1/inventory', apiKeyAuth, async (req, res) => {
 
 app.get('/api/v1/kpis', apiKeyAuth, async (req, res) => {
   try {
-    const company_id = req.company_id;
     const result = await pool.query(`
-      SELECT
-        SUM(quantity * unit_price) AS total_revenue,
+      SELECT SUM(quantity * unit_price) AS total_revenue,
         SUM(quantity * unit_price - quantity * unit_cost) AS total_profit,
         COUNT(*) AS total_transactions,
         SUM(quantity) AS total_units_sold,
         ROUND(AVG(unit_price), 2) AS avg_unit_price,
         MAX(sale_date) AS last_sale_date
-      FROM sales WHERE company_id = $1 AND deleted_at IS NULL
-    `, [company_id]);
-    res.json({ success: true, data: result.rows[0], company: req.apiKey.company_name });
+      FROM sales WHERE company_id = $1
+    `, [req.company_id]);
+    res.json({ success: true, data: result.rows[0],
+      company: req.apiKey.company_name });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -1407,16 +1517,16 @@ app.get('/api/v1/kpis', apiKeyAuth, async (req, res) => {
 
 app.get('/api/v1/categories', apiKeyAuth, async (req, res) => {
   try {
-    const company_id = req.company_id;
     const result = await pool.query(`
       SELECT category,
         SUM(quantity * unit_price) AS revenue,
         SUM(quantity * unit_price - quantity * unit_cost) AS profit,
         COUNT(*) AS transactions, SUM(quantity) AS units_sold
-      FROM sales WHERE company_id = $1 AND deleted_at IS NULL
+      FROM sales WHERE company_id = $1
       GROUP BY category ORDER BY revenue DESC
-    `, [company_id]);
-    res.json({ success: true, count: result.rows.length, data: result.rows, company: req.apiKey.company_name });
+    `, [req.company_id]);
+    res.json({ success: true, count: result.rows.length,
+      data: result.rows, company: req.apiKey.company_name });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -1424,16 +1534,16 @@ app.get('/api/v1/categories', apiKeyAuth, async (req, res) => {
 
 app.get('/api/v1/regions', apiKeyAuth, async (req, res) => {
   try {
-    const company_id = req.company_id;
     const result = await pool.query(`
       SELECT region,
         SUM(quantity * unit_price) AS revenue,
         SUM(quantity * unit_price - quantity * unit_cost) AS profit,
         COUNT(*) AS transactions, SUM(quantity) AS units_sold
-      FROM sales WHERE company_id = $1 AND deleted_at IS NULL
+      FROM sales WHERE company_id = $1
       GROUP BY region ORDER BY revenue DESC
-    `, [company_id]);
-    res.json({ success: true, count: result.rows.length, data: result.rows, company: req.apiKey.company_name });
+    `, [req.company_id]);
+    res.json({ success: true, count: result.rows.length,
+      data: result.rows, company: req.apiKey.company_name });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -1441,18 +1551,17 @@ app.get('/api/v1/regions', apiKeyAuth, async (req, res) => {
 
 app.get('/api/v1/monthly', apiKeyAuth, async (req, res) => {
   try {
-    const company_id = req.company_id;
     const result = await pool.query(`
-      SELECT
-        TO_CHAR(sale_date, 'YYYY-MM') AS month,
+      SELECT TO_CHAR(sale_date, 'YYYY-MM') AS month,
         SUM(quantity * unit_price) AS revenue,
         SUM(quantity * unit_price - quantity * unit_cost) AS profit,
         COUNT(*) AS transactions
-      FROM sales WHERE company_id = $1 AND deleted_at IS NULL
+      FROM sales WHERE company_id = $1
       GROUP BY TO_CHAR(sale_date, 'YYYY-MM')
       ORDER BY month ASC
-    `, [company_id]);
-    res.json({ success: true, count: result.rows.length, data: result.rows, company: req.apiKey.company_name });
+    `, [req.company_id]);
+    res.json({ success: true, count: result.rows.length,
+      data: result.rows, company: req.apiKey.company_name });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -1495,6 +1604,342 @@ app.get('/api/superadmin/companies/:id/apikeys',
       [id]
     );
     res.json({ success: true, data: result.rows });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ══════════════════════════════════════════════════════════
+//  BILLING — ONEKHUSA CHECKOUT
+// ══════════════════════════════════════════════════════════
+
+app.get('/api/billing/plans', protect, async (req, res) => {
+  try {
+    const company_id = req.user.company_id;
+    const result = await pool.query(
+      `SELECT subscription_status, subscription_expires_at,
+              trial_ends_at, daily_sales_count, daily_sales_date
+       FROM companies WHERE id = $1`,
+      [company_id]
+    );
+    const company = result.rows[0];
+    const now = new Date();
+    const trialEnd = new Date(company.trial_ends_at);
+    const daysLeft = Math.ceil((trialEnd - now) / (1000 * 60 * 60 * 24));
+    const today = new Date().toISOString().split('T')[0];
+    const lastDate = company.daily_sales_date
+      ? new Date(company.daily_sales_date).toISOString().split('T')[0]
+      : null;
+    const dailyCount = lastDate !== today
+      ? 0 : (company.daily_sales_count || 0);
+    res.json({
+      success: true,
+      data: {
+        subscription_status: company.subscription_status,
+        trial_ends_at: company.trial_ends_at,
+        subscription_expires_at: company.subscription_expires_at,
+        days_left: daysLeft,
+        daily_count: dailyCount,
+        daily_limit: 10,
+        plans: PLAN_PRICES
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/billing/checkout', protect, adminOnly, async (req, res) => {
+  try {
+    const company_id = req.user.company_id;
+    const { plan, months } = req.body;
+
+    if (!PLAN_PRICES[plan]) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid plan. Choose starter, professional or enterprise.'
+      });
+    }
+
+    const amount = PLAN_PRICES[plan].monthly * (months || 1);
+    const reference = generateReference();
+    const idempotencyKey = `${company_id}-${reference}-${Date.now()}`;
+
+    await pool.query(
+      `INSERT INTO billing
+       (company_id, plan, months, amount_mwk, reference_number, status)
+       VALUES ($1,$2,$3,$4,$5,'pending')`,
+      [company_id, plan, months || 1, amount, reference]
+    );
+
+    const payload = {
+      authentication: {
+        apiKey: ONEKHUSA_API_KEY,
+        apiSecret: ONEKHUSA_API_SECRET
+      },
+      merchant: {
+        organisationId: ONEKHUSA_ORG_ID,
+        merchantAccountNumber: ONEKHUSA_MERCHANT
+      },
+      payment: {
+        sourceReferenceNumber: reference,
+        description: `SABIAS ${PLAN_PRICES[plan].name} Plan - ${months || 1} Month(s)`,
+        amount: amount
+      },
+      route: {
+        successRedirectionUrl: `https://sabiasanalytics.com?payment=success&ref=${reference}`,
+        failureRedirectionUrl: `https://sabiasanalytics.com?payment=failed&ref=${reference}`,
+        callbackApiUrl: `https://malawi-sales-backend.onrender.com/api/billing/webhook`
+      }
+    };
+
+    const data = JSON.stringify(payload);
+
+    const response = await new Promise((resolve, reject) => {
+      const options = {
+        hostname: 'api.onekhusa.com',
+        port: 443,
+        path: '/sandbox/v1/checkout/rtp/initiate',
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Idempotency-Key': idempotencyKey,
+          'Content-Length': Buffer.byteLength(data)
+        }
+      };
+      const req2 = https.request(options, (r) => {
+        let body = '';
+        r.on('data', chunk => body += chunk);
+        r.on('end', () => resolve({ status: r.statusCode, body }));
+      });
+      req2.on('error', reject);
+      req2.write(data);
+      req2.end();
+    });
+
+    const responseData = JSON.parse(response.body);
+
+    if (response.status !== 200 || !responseData.paymentTransactionId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Payment initiation failed. Please try again.',
+        details: responseData
+      });
+    }
+
+    await pool.query(
+      `UPDATE billing SET payment_transaction_id = $1
+       WHERE reference_number = $2`,
+      [responseData.paymentTransactionId, reference]
+    );
+
+    const checkoutUrl = `https://checkout.onekhusa.com/requestToPay/initiate?ptid=${responseData.paymentTransactionId}`;
+
+    res.json({
+      success: true,
+      checkoutUrl,
+      reference,
+      amount,
+      plan,
+      months: months || 1,
+      paymentTransactionId: responseData.paymentTransactionId
+    });
+
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── WEBHOOK — OneKhusa notifies us after payment ──────────
+app.post('/api/billing/webhook', async (req, res) => {
+  try {
+    const event = req.headers['x-onekhusa-webhook-event'];
+    const body = req.body;
+    console.log('OneKhusa Webhook:', event, JSON.stringify(body));
+
+    // Acknowledge immediately
+    res.json({ success: true, received: true });
+
+    if (event !== 'payrequest.success' && event !== 'payment.success') return;
+    if (body.transactionStatusCode !== 'S') return;
+
+    const reference = body.metaData?.referenceNumber
+      || body.sourceReferenceNumber;
+    if (!reference) return;
+
+    const billingResult = await pool.query(
+      `SELECT * FROM billing
+       WHERE reference_number = $1 AND status = 'pending'`,
+      [reference]
+    );
+    if (billingResult.rows.length === 0) return;
+    const billing = billingResult.rows[0];
+
+    const expiresAt = new Date();
+    expiresAt.setMonth(expiresAt.getMonth() + billing.months);
+
+    await pool.query(
+      `UPDATE companies
+       SET subscription_status = 'active',
+           subscription_expires_at = $1,
+           active = true,
+           daily_sales_count = 0,
+           daily_sales_date = CURRENT_DATE
+       WHERE id = $2`,
+      [expiresAt, billing.company_id]
+    );
+
+    await pool.query(
+      `UPDATE billing SET status = 'paid', paid_at = NOW(),
+       onekhusa_transaction_ref = $1
+       WHERE reference_number = $2`,
+      [body.transactionReferenceNumber || 'N/A', reference]
+    );
+
+    const adminResult = await pool.query(
+      `SELECT u.email, u.name, c.name as company_name
+       FROM users u JOIN companies c ON c.id = u.company_id
+       WHERE u.company_id = $1 AND u.role = 'admin' LIMIT 1`,
+      [billing.company_id]
+    );
+
+    if (adminResult.rows.length > 0) {
+      const admin = adminResult.rows[0];
+      const html = `
+        <div style="font-family:Arial,sans-serif;max-width:600px;
+                    margin:0 auto;background:#FFF8F0;padding:32px;
+                    border-radius:12px;">
+          <div style="background:#3E1F00;padding:20px 32px;
+                      border-radius:10px;text-align:center;
+                      margin-bottom:24px;">
+            <div style="color:#FFB800;font-size:28px;font-weight:bold;
+                        letter-spacing:4px;">SABIAS</div>
+            <div style="color:#FF6B35;font-size:11px;margin-top:4px;">
+              Payment Confirmation
+            </div>
+          </div>
+          <div style="background:#E8F5E9;border-left:4px solid #2D6A4F;
+                      border-radius:10px;padding:20px;margin-bottom:20px;">
+            <div style="color:#2D6A4F;font-size:20px;font-weight:bold;
+                        margin-bottom:8px;">Payment Successful!</div>
+            <div style="color:#333;font-size:14px;line-height:1.6;">
+              Hi ${admin.name}, your SABIAS subscription for
+              <strong>${admin.company_name}</strong> is now active.
+            </div>
+          </div>
+          <div style="background:white;border-radius:10px;padding:20px;
+                      border-left:4px solid #2D6A4F;margin-bottom:16px;">
+            <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
+              Plan: <strong>${billing.plan.toUpperCase()}</strong>
+            </div>
+            <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
+              Duration: <strong>${billing.months} Month(s)</strong>
+            </div>
+            <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
+              Amount: <strong>MWK ${new Intl.NumberFormat().format(billing.amount_mwk)}</strong>
+            </div>
+            <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
+              Expires: <strong>${expiresAt.toLocaleDateString()}</strong>
+            </div>
+            <div style="color:#3E1F00;font-size:14px;margin:8px 0;">
+              Reference: <strong>${reference}</strong>
+            </div>
+          </div>
+          <div style="background:#3E1F00;border-radius:10px;padding:16px;
+                      text-align:center;">
+            <a href="https://sabiasanalytics.com"
+               style="color:#FFB800;font-weight:bold;font-size:15px;
+                      text-decoration:none;">Login to SABIAS</a>
+          </div>
+        </div>`;
+
+      sendEmail(
+        admin.email,
+        `SABIAS Subscription Activated — ${admin.company_name}`,
+        html
+      ).catch(err => console.error('Confirm email error:', err));
+
+      sendEmail(
+        'mwandirakings@gmail.com',
+        `New Payment: ${admin.company_name} — MWK ${billing.amount_mwk}`,
+        `<p><strong>${admin.company_name}</strong> paid MWK ${billing.amount_mwk} for ${billing.plan} plan (${billing.months} month/s). Ref: ${reference}</p>`
+      ).catch(err => console.error('Notify email error:', err));
+    }
+
+  } catch (err) {
+    console.error('Webhook error:', err.message);
+  }
+});
+
+app.get('/api/billing/status/:reference', protect, async (req, res) => {
+  try {
+    const { reference } = req.params;
+    const company_id = req.user.company_id;
+    const result = await pool.query(
+      `SELECT * FROM billing
+       WHERE reference_number = $1 AND company_id = $2`,
+      [reference, company_id]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false, error: 'Record not found'
+      });
+    }
+    res.json({ success: true, data: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.get('/api/billing/history', protect, adminOnly, async (req, res) => {
+  try {
+    const company_id = req.user.company_id;
+    const result = await pool.query(
+      `SELECT * FROM billing WHERE company_id = $1
+       ORDER BY created_at DESC`,
+      [company_id]
+    );
+    res.json({ success: true, data: result.rows });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.get('/api/billing/daily-status', protect, async (req, res) => {
+  try {
+    const company_id = req.user.company_id;
+    const result = await pool.query(
+      `SELECT subscription_status, subscription_expires_at,
+              trial_ends_at, daily_sales_count, daily_sales_date
+       FROM companies WHERE id = $1`,
+      [company_id]
+    );
+    const company = result.rows[0];
+    const now = new Date();
+    const trialEnd = new Date(company.trial_ends_at);
+    const subEnd = company.subscription_expires_at
+      ? new Date(company.subscription_expires_at) : null;
+    const trialActive = company.subscription_status === 'trial'
+      && trialEnd > now;
+    const subActive = company.subscription_status === 'active'
+      && subEnd && subEnd > now;
+    const isFullAccess = trialActive || subActive;
+    const today = new Date().toISOString().split('T')[0];
+    const lastDate = company.daily_sales_date
+      ? new Date(company.daily_sales_date).toISOString().split('T')[0]
+      : null;
+    const dailyCount = lastDate !== today
+      ? 0 : (company.daily_sales_count || 0);
+    res.json({
+      success: true,
+      data: {
+        isFullAccess,
+        dailyCount,
+        dailyLimit: 10,
+        remaining: isFullAccess ? 'unlimited' : Math.max(0, 10 - dailyCount),
+        subscription_status: company.subscription_status
+      }
+    });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
