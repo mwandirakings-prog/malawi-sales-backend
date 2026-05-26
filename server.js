@@ -599,10 +599,32 @@ app.post('/api/auth/reset-password', async (req, res) => {
 // ── COMPANY REGISTRATION ──────────────────────────────────
 app.post('/api/companies/register', registerLimiter, async (req, res) => {
   const { company_name, email, phone, city, address,
-          admin_name, password } = req.body;
+          admin_name, password, otp } = req.body;
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+
+    // ── Verify OTP ──────────────────────────────────────
+    const otpResult = await client.query(
+      `SELECT * FROM otp_codes
+       WHERE LOWER(email) = LOWER($1)
+       AND code = $2
+       AND expires_at > NOW()`,
+      [email, otp]
+    );
+    if (otpResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid or expired OTP code. Please request a new code.'
+      });
+    }
+    // Delete used OTP
+    await client.query(
+      'DELETE FROM otp_codes WHERE LOWER(email) = LOWER($1)',
+      [email]
+    );
+
     const existing = await client.query(
       'SELECT id FROM companies WHERE LOWER(email) = LOWER($1)', [email]
     );
@@ -1939,6 +1961,102 @@ app.get('/api/billing/daily-status', protect, async (req, res) => {
         remaining: isFullAccess ? 'unlimited' : Math.max(0, 10 - dailyCount),
         subscription_status: company.subscription_status
       }
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── SEND OTP — called before registration ─────────────────
+app.post('/api/auth/send-otp', async (req, res) => {
+  try {
+    const { email, company_name } = req.body;
+
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid email address format.'
+      });
+    }
+
+    // Check if email already exists
+    const existing = await pool.query(
+      'SELECT id FROM companies WHERE LOWER(email) = LOWER($1)',
+      [email]
+    );
+    if (existing.rows.length > 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'This email address is already registered.'
+      });
+    }
+
+    // Generate 6 digit OTP
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiry = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+
+    // Store OTP in database
+    await pool.query(
+      `INSERT INTO otp_codes (email, code, expires_at)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (email)
+       DO UPDATE SET code = $2, expires_at = $3, created_at = NOW()`,
+      [email.toLowerCase(), otp, expiry]
+    );
+
+    // Send OTP email
+    const html = `
+      <div style="font-family:Arial,sans-serif;max-width:600px;
+                  margin:0 auto;background:#FFF8F0;padding:32px;
+                  border-radius:12px;">
+        <div style="background:#3E1F00;padding:20px 32px;
+                    border-radius:10px;text-align:center;
+                    margin-bottom:24px;">
+          <div style="color:#FFB800;font-size:28px;font-weight:bold;
+                      letter-spacing:4px;">SABIAS</div>
+          <div style="color:#FF6B35;font-size:11px;margin-top:4px;">
+            Email Verification
+          </div>
+        </div>
+        <h2 style="color:#3E1F00;margin:0 0 8px;">
+          Verify Your Email Address
+        </h2>
+        <p style="color:#555;font-size:14px;line-height:1.7;">
+          Hi! You are registering <strong>${company_name}</strong>
+          on SABIAS. Enter this code to complete your registration:
+        </p>
+        <div style="background:#3E1F00;border-radius:12px;
+                    padding:24px;text-align:center;margin:24px 0;">
+          <div style="color:#FFB800;font-size:42px;font-weight:bold;
+                      letter-spacing:12px;">
+            ${otp}
+          </div>
+          <div style="color:#FF6B35;font-size:12px;margin-top:8px;">
+            This code expires in 10 minutes
+          </div>
+        </div>
+        <div style="background:white;border-radius:10px;padding:16px;
+                    border-left:4px solid #FF6B35;margin-bottom:20px;">
+          <div style="color:#888;font-size:12px;font-weight:bold;
+                      margin-bottom:4px;">SECURITY NOTICE</div>
+          <div style="color:#555;font-size:13px;">
+            If you did not request this, please ignore this email.
+            Do not share this code with anyone.
+          </div>
+        </div>
+        <div style="text-align:center;color:#888;font-size:12px;">
+          <strong style="color:#3E1F00;">Kings Mwandira</strong><br/>
+          CEO, SABIAS · 0996 175 162
+        </div>
+      </div>`;
+
+    await sendEmail(email, 'SABIAS — Your Verification Code', html);
+
+    res.json({
+      success: true,
+      message: 'Verification code sent to your email address.'
     });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
