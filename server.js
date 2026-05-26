@@ -78,7 +78,7 @@ app.get('/', (req, res) => {
 const sendEmail = async (to, subject, html) => {
   return new Promise((resolve, reject) => {
     const data = JSON.stringify({
-      from: 'SABIAS <onboarding@resend.dev>',
+     from: 'SABIAS <noreply@sabiasanalytics.com>',
       to: [to],
       subject,
       html,
@@ -2054,8 +2054,7 @@ app.post('/api/auth/send-otp', async (req, res) => {
 
   // Send to verified email in sandbox mode
 console.log('Sending OTP to:', email, 'OTP:', otp);
-await sendEmail('mwandirakings@gmail.com',
-  `SABIAS OTP for ${email}: ${otp}`, html);
+await sendEmail(email, 'SABIAS — Your Verification Code', html);
 console.log(`OTP for ${email}: ${otp}`);
 
     res.json({
