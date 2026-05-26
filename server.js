@@ -2052,7 +2052,10 @@ app.post('/api/auth/send-otp', async (req, res) => {
         </div>
       </div>`;
 
-    await sendEmail(email, 'SABIAS — Your Verification Code', html);
+    // Send to verified email in sandbox mode
+await sendEmail('mwandirakings@gmail.com',
+  `SABIAS OTP for ${email}: ${otp}`, html);
+console.log(`OTP for ${email}: ${otp}`);
 
     res.json({
       success: true,
