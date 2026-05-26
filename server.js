@@ -2052,7 +2052,8 @@ app.post('/api/auth/send-otp', async (req, res) => {
         </div>
       </div>`;
 
-    // Send to verified email in sandbox mode
+  // Send to verified email in sandbox mode
+console.log('Sending OTP to:', email, 'OTP:', otp);
 await sendEmail('mwandirakings@gmail.com',
   `SABIAS OTP for ${email}: ${otp}`, html);
 console.log(`OTP for ${email}: ${otp}`);
