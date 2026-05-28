@@ -799,8 +799,10 @@ app.get('/api/companies', protect, adminOnly, async (req, res) => {
 app.get('/api/sales', protect, async (req, res) => {
   try {
     const company_id = req.user.company_id;
+    const { include_deleted } = req.query;
     const result = await pool.query(
       `SELECT * FROM sales WHERE company_id = $1
+       ${include_deleted === 'true' ? '' : 'AND deleted_at IS NULL'}
        ORDER BY sale_date DESC`,
       [company_id]
     );
@@ -1305,7 +1307,7 @@ app.get('/api/trial/status', protect, async (req, res) => {
 const apiKeyAuth = async (req, res, next) => {
   try {
     const authHeader = req.headers['authorization'];
-    if (!authHeader || !authHeader.startsWith('Bearer sk_live_sabias_')) {
+    if (!authHeader || (!authHeader.startsWith('Bearer sk_live_sabias_') && !authHeader.startsWith('Bearer sk_test_sabias_'))) {
       return res.status(401).json({
         success: false,
         error: 'Invalid or missing API key.',
@@ -2062,6 +2064,138 @@ console.log(`OTP for ${email}: ${otp}`);
     res.json({
       success: true,
       message: 'Verification code sent to your email address.'
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── SALES — SOFT DELETE ───────────────────────────────────
+app.delete('/api/sales/:id', protect, noViewer, async (req, res) => {
+  try {
+    const company_id = req.user.company_id;
+    const { id } = req.params;
+    await pool.query(
+      `UPDATE sales SET deleted_at = NOW()
+       WHERE id = $1 AND company_id = $2`,
+      [id, company_id]
+    );
+    res.json({ success: true, message: 'Sale moved to trash.' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── SALES — RESTORE FROM TRASH ────────────────────────────
+app.put('/api/sales/:id/restore', protect, adminOnly, async (req, res) => {
+  try {
+    const company_id = req.user.company_id;
+    const { id } = req.params;
+    await pool.query(
+      `UPDATE sales SET deleted_at = NULL
+       WHERE id = $1 AND company_id = $2`,
+      [id, company_id]
+    );
+    res.json({ success: true, message: 'Sale restored successfully.' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── PROFILE — UPDATE ──────────────────────────────────────
+app.put('/api/auth/profile', protect, async (req, res) => {
+  try {
+    const { name, email } = req.body;
+    const user_id = req.user.id;
+    const company_id = req.user.company_id;
+
+    if (!name || name.trim().length < 2) {
+      return res.status(400).json({
+        success: false,
+        error: 'Name must be at least 2 characters.'
+      });
+    }
+
+    // Check email not taken by another user
+    if (email) {
+      const existing = await pool.query(
+        `SELECT id FROM users
+         WHERE LOWER(email) = LOWER($1) AND id != $2`,
+        [email, user_id]
+      );
+      if (existing.rows.length > 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'This email is already used by another account.'
+        });
+      }
+    }
+
+    const result = await pool.query(
+      `UPDATE users SET name = $1, email = COALESCE($2, email)
+       WHERE id = $3
+       RETURNING id, name, email, role, region, company_id`,
+      [name.trim(), email?.trim() || null, user_id]
+    );
+
+    res.json({
+      success: true,
+      message: 'Profile updated successfully!',
+      data: result.rows[0]
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── PASSWORD — CHANGE ─────────────────────────────────────
+app.put('/api/auth/change-password', protect, async (req, res) => {
+  try {
+    const { current_password, new_password } = req.body;
+    const user_id = req.user.id;
+
+    if (!current_password || !new_password) {
+      return res.status(400).json({
+        success: false,
+        error: 'Current and new password are required.'
+      });
+    }
+
+    if (new_password.length < 8) {
+      return res.status(400).json({
+        success: false,
+        error: 'New password must be at least 8 characters.'
+      });
+    }
+
+    // Get current password hash
+    const result = await pool.query(
+      'SELECT password FROM users WHERE id = $1',
+      [user_id]
+    );
+    const user = result.rows[0];
+
+    // Verify current password
+    const match = await bcrypt.compare(current_password, user.password);
+    if (!match) {
+      return res.status(400).json({
+        success: false,
+        error: 'Current password is incorrect.'
+      });
+    }
+
+    // Hash and save new password
+    const hashed = await bcrypt.hash(new_password, 10);
+    await pool.query(
+      `UPDATE users SET password = $1,
+       login_attempts = 0, locked_until = NULL
+       WHERE id = $2`,
+      [hashed, user_id]
+    );
+
+    res.json({
+      success: true,
+      message: 'Password changed successfully!'
     });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
