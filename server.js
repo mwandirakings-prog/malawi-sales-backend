@@ -16,6 +16,7 @@ app.use(cors({
     'https://sabiasanalytics.com',
     'https://www.sabiasanalytics.com',
     'https://info.sabiasanalytics.com',
+    'https://api.sabiasanalytics.com',
     'https://sabiasanalytics.netlify.app',
     'http://localhost:3000'
   ],
