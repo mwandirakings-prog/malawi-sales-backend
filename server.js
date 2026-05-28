@@ -1358,9 +1358,10 @@ const apiKeyAuth = async (req, res, next) => {
 };
 
 // ── GENERATE API KEY HELPER ───────────────────────────────
-const generateApiKey = () => {
+const generateApiKey = (type = 'live') => {
   const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
-  let result = 'sk_live_sabias_';
+  const prefix = type === 'test' ? 'sk_test_sabias_' : 'sk_live_sabias_';
+  let result = prefix;
   for (let i = 0; i < 24; i++) {
     result += chars.charAt(Math.floor(Math.random() * chars.length));
   }
@@ -1389,7 +1390,7 @@ app.get('/api/apikeys', protect, adminOnly, async (req, res) => {
 app.post('/api/apikeys', protect, adminOnly, async (req, res) => {
   try {
     const company_id = req.user.company_id;
-    const { name } = req.body;
+    const { name, key_type } = req.body;
     const countResult = await pool.query(
       'SELECT COUNT(*) FROM api_keys WHERE company_id = $1 AND active = true',
       [company_id]
@@ -1400,7 +1401,7 @@ app.post('/api/apikeys', protect, adminOnly, async (req, res) => {
         error: 'Maximum of 3 active API keys allowed per company.'
       });
     }
-    const keyValue = generateApiKey();
+    const keyValue = generateApiKey(key_type || 'live');
     const result = await pool.query(
       `INSERT INTO api_keys (company_id, name, key_value)
        VALUES ($1, $2, $3) RETURNING *`,
