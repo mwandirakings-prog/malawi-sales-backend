@@ -2220,6 +2220,52 @@ app.put('/api/superadmin/companies/:id/remove-plan',
   }
 });
 
+// ── SALE APPROVAL — APPROVE ───────────────────────────────
+app.put('/api/sales/:id/approve', protect, adminOnly, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const company_id = req.user.company_id;
+    const result = await pool.query(
+      `UPDATE sales SET approval_status = 'approved'
+       WHERE id = $1 AND company_id = $2 RETURNING *`,
+      [id, company_id]
+    );
+    res.json({ success: true, data: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── SALE APPROVAL — REJECT (restores stock) ───────────────
+app.put('/api/sales/:id/reject', protect, adminOnly, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const company_id = req.user.company_id;
+    const saleResult = await pool.query(
+      'SELECT * FROM sales WHERE id = $1 AND company_id = $2',
+      [id, company_id]
+    );
+    if (saleResult.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Sale not found' });
+    }
+    const sale = saleResult.rows[0];
+    // Restore stock
+    await pool.query(
+      `UPDATE inventory SET quantity_in_stock = quantity_in_stock + $1
+       WHERE LOWER(product) = LOWER($2) AND company_id = $3`,
+      [sale.quantity, sale.product, company_id]
+    );
+    await pool.query(
+      `UPDATE sales SET approval_status = 'rejected'
+       WHERE id = $1 AND company_id = $2`,
+      [id, company_id]
+    );
+    res.json({ success: true, message: 'Sale rejected and stock restored.' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ── GLOBAL ERROR HANDLER ──────────────────────────────────
 app.use((err, req, res, next) => {
   console.error('Unhandled error:', err.message);
