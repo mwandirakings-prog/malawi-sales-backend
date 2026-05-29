@@ -2202,6 +2202,24 @@ app.put('/api/auth/change-password', protect, async (req, res) => {
   }
 });
 
+// ── SUPER ADMIN — REMOVE PAID PLAN ───────────────────────
+app.put('/api/superadmin/companies/:id/remove-plan',
+  protect, superAdminOnly, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await pool.query(
+      `UPDATE companies
+       SET subscription_status = 'trial',
+           subscription_expires_at = NULL
+       WHERE id = $1 RETURNING *`,
+      [id]
+    );
+    res.json({ success: true, data: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ── GLOBAL ERROR HANDLER ──────────────────────────────────
 app.use((err, req, res, next) => {
   console.error('Unhandled error:', err.message);
