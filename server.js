@@ -1690,14 +1690,45 @@ app.post('/api/disbursements', protect, adminOnly, async (req, res) => {
       req2.write(payload);
       req2.end();
     });
+    const onekhusaRef = response.body.transactionReferenceNumber || null;
+
+    // Auto-approve if submission succeeded
+    if (response.body.responseCode === 'S100' && onekhusaRef) {
+      const approvePayload = JSON.stringify({
+        merchantAccountNumber: ONEKHUSA_MERCHANT,
+        transactionReferenceNumber: onekhusaRef,
+        actionedBy: 'sabiasadmin@gmail.com'
+      });
+      const approveKey = `appr-${company_id}-${onekhusaRef}-${Date.now()}`;
+      await new Promise((resolve, reject) => {
+        const options = {
+          hostname: 'api.onekhusa.com', port: 443,
+          path: '/sandbox/v1/disbursements/single/approve', method: 'PUT',
+          headers: {
+            'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json',
+            'Accept-Language': 'en', 'X-Idempotency-Key': approveKey,
+            'Content-Length': Buffer.byteLength(approvePayload)
+          }
+        };
+        const req3 = https.request(options, (r) => {
+          let body = '';
+          r.on('data', chunk => body += chunk);
+          r.on('end', () => resolve(JSON.parse(body)));
+        });
+        req3.on('error', reject);
+        req3.write(approvePayload);
+        req3.end();
+      });
+    }
+
     await pool.query(
       `UPDATE disbursements SET onekhusa_ref = $1, status = $2 WHERE reference_number = $3`,
-      [response.body.transactionReferenceNumber || null,
+      [onekhusaRef,
        response.body.responseCode === 'S100' ? 'processing' : 'failed', reference]
     );
     res.json({
       success: true, reference,
-      onekhusa_ref: response.body.transactionReferenceNumber,
+      onekhusa_ref: onekhusaRef,
       response_code: response.body.responseCode,
       message: response.body.responseCode === 'S100'
         ? 'Disbursement submitted successfully. Awaiting processing.'
