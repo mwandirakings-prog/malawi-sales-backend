@@ -1669,7 +1669,7 @@ app.post('/api/disbursements', protect, adminOnly, async (req, res) => {
       connectorId: parseInt(connector_id),
       transactionAmount: parseFloat(amount),
       transactionDescription: description || 'Supplier Payment',
-      capturedBy: req.user.email
+      capturedBy: 'sabiasadmin@gmail.com'
     });
     const response = await new Promise((resolve, reject) => {
       const options = {
