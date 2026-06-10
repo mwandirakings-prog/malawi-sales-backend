@@ -1715,7 +1715,7 @@ app.post('/api/billing/checkout', protect, adminOnly, async (req, res) => {
       route: {
         successRedirectionUrl: `https://sabiasanalytics.com?payment=success&ref=${reference}`,
         failureRedirectionUrl: `https://sabiasanalytics.com?payment=failed&ref=${reference}`,
-        callbackApiUrl: `https://malawi-sales-backend.onrender.com/api/billing/webhook`
+        callbackApiUrl: `https://api.sabiasanalytics.com/api/billing/webhook`
       }
     };
 
