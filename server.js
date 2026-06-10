@@ -205,7 +205,7 @@ const PLAN_PRICES = {
 const generateReference = () => {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
   let ref = 'SAB';
-  for (let i = 0; i < 10; i++) {
+  for (let i = 0; i < 9; i++) {
     ref += chars.charAt(Math.floor(Math.random() * chars.length));
   }
   return ref;
