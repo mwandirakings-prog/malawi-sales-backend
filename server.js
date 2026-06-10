@@ -215,16 +215,19 @@ const generateReference = () => {
 const getOneKhusaToken = async () => {
   const data = JSON.stringify({
     apiKey: ONEKHUSA_API_KEY,
-    apiSecret: ONEKHUSA_API_SECRET
+    apiSecret: ONEKHUSA_API_SECRET,
+    organisationId: ONEKHUSA_ORG_ID,
+    merchantAccountNumber: ONEKHUSA_MERCHANT
   });
   const response = await new Promise((resolve, reject) => {
     const options = {
       hostname: 'api.onekhusa.com',
       port: 443,
-      path: '/sandbox/v1/auth/token',
+      path: '/sandbox/v1/account/getAccessToken',
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        'Accept-Language': 'en',
         'Content-Length': Buffer.byteLength(data)
       }
     };
