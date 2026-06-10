@@ -1618,7 +1618,7 @@ app.get('/api/disbursements/connectors', protect, adminOnly, async (req, res) =>
     const response = await new Promise((resolve, reject) => {
       const options = {
         hostname: 'api.onekhusa.com', port: 443,
-        path: '/sandbox/v1/connectors', method: 'GET',
+        path: '/sandbox/v1/core/connectors/GetAll', method: 'GET',
         headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }
       };
       const req = https.request(options, (r) => {
