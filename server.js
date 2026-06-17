@@ -191,10 +191,10 @@ const notifyAdminStockAlert = async (item, salesperson, sale_date, company_id) =
 };
 
 // ── ONEKHUSA CONFIG ───────────────────────────────────────
-const ONEKHUSA_API_KEY = 'sandbox_jg1-F31nVt0bYVO6MSGF1xenLxWZaJ5kYA';
-const ONEKHUSA_API_SECRET = 'dh-dZGQYqC5chepHN4BHlEScbYs9t3ajbSyk5WxbZ6GqOIlaQmsHh6m0PSHJ';
-const ONEKHUSA_ORG_ID = 'Y7VGV77AJDZ6';
-const ONEKHUSA_MERCHANT = 78487105;
+const ONEKHUSA_API_KEY = 'Live_fvhsx7QpZn9nhSN5kowW-BkY5shlqJUj7g';
+const ONEKHUSA_API_SECRET = 'D-AGtrOiPtGOV_rib35EFKbh_flXmLSGlWbx_64eIpzLP7TJID56b3mBBBMC';
+const ONEKHUSA_ORG_ID = 'LFT0XD8WJIQK';
+const ONEKHUSA_MERCHANT = 87949766;
 
 const PLAN_PRICES = {
   starter:      { monthly: 5000,  name: 'Starter' },
@@ -223,7 +223,7 @@ const getOneKhusaToken = async () => {
     const options = {
       hostname: 'api.onekhusa.com',
       port: 443,
-      path: '/sandbox/v1/account/getAccessToken',
+      path: '/Live/v1/account/getAccessToken',
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -1148,10 +1148,10 @@ app.get('/api/trial/status', protect, async (req, res) => {
 const apiKeyAuth = async (req, res, next) => {
   try {
     const authHeader = req.headers['authorization'];
-    if (!authHeader || (!authHeader.startsWith('Bearer sk_live_sabias_') && !authHeader.startsWith('Bearer sk_test_sabias_'))) {
+    if (!authHeader || (!authHeader.startsWith('Bearer sk_Live_sabias_') && !authHeader.startsWith('Bearer sk_test_sabias_'))) {
       return res.status(401).json({
         success: false, error: 'Invalid or missing API key.',
-        hint: 'Include your API key in the Authorization header: Bearer sk_live_sabias_xxxx'
+        hint: 'Include your API key in the Authorization header: Bearer sk_Live_sabias_xxxx'
       });
     }
     const keyValue = authHeader.replace('Bearer ', '').trim();
@@ -1187,9 +1187,9 @@ const apiKeyAuth = async (req, res, next) => {
 };
 
 // ── GENERATE API KEY HELPER ───────────────────────────────
-const generateApiKey = (type = 'live') => {
+const generateApiKey = (type = 'Live') => {
   const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
-  const prefix = type === 'test' ? 'sk_test_sabias_' : 'sk_live_sabias_';
+  const prefix = type === 'test' ? 'sk_test_sabias_' : 'sk_Live_sabias_';
   let result = prefix;
   for (let i = 0; i < 24; i++) {
     result += chars.charAt(Math.floor(Math.random() * chars.length));
@@ -1223,7 +1223,7 @@ app.post('/api/apikeys', protect, adminOnly, async (req, res) => {
     if (parseInt(countResult.rows[0].count) >= 3) {
       return res.status(400).json({ success: false, error: 'Maximum of 3 active API keys allowed per company.' });
     }
-    const keyValue = generateApiKey(key_type || 'live');
+    const keyValue = generateApiKey(key_type || 'Live');
     const result = await pool.query(
       `INSERT INTO api_keys (company_id, name, key_value) VALUES ($1, $2, $3) RETURNING *`,
       [company_id, name || 'My API Key', keyValue]
@@ -1462,7 +1462,7 @@ app.post('/api/billing/checkout', protect, adminOnly, async (req, res) => {
     const response = await new Promise((resolve, reject) => {
       const options = {
         hostname: 'api.onekhusa.com', port: 443,
-        path: '/sandbox/v1/checkout/rtp/initiate', method: 'POST',
+        path: '/Live/v1/checkout/rtp/initiate', method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Idempotency-Key': idempotencyKey, 'Content-Length': Buffer.byteLength(data) }
       };
       const req2 = https.request(options, (r) => {
@@ -1621,7 +1621,7 @@ app.get('/api/disbursements/connectors', protect, adminOnly, async (req, res) =>
     const response = await new Promise((resolve, reject) => {
       const options = {
         hostname: 'api.onekhusa.com', port: 443,
-        path: '/sandbox/v1/core/connectors/GetAll', method: 'GET',
+        path: '/Live/v1/core/connectors/GetAll', method: 'GET',
         headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }
       };
       const req = https.request(options, (r) => {
@@ -1674,7 +1674,7 @@ app.post('/api/disbursements', protect, adminOnly, async (req, res) => {
     const response = await new Promise((resolve, reject) => {
       const options = {
         hostname: 'api.onekhusa.com', port: 443,
-        path: '/sandbox/v1/disbursements/single/add', method: 'POST',
+        path: '/Live/v1/disbursements/single/add', method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json',
           'Accept-Language': 'en', 'X-Idempotency-Key': idempotencyKey,
@@ -1703,7 +1703,7 @@ app.post('/api/disbursements', protect, adminOnly, async (req, res) => {
       await new Promise((resolve, reject) => {
         const options = {
           hostname: 'api.onekhusa.com', port: 443,
-          path: '/sandbox/v1/disbursements/single/approve', method: 'PUT',
+          path: '/Live/v1/disbursements/single/approve', method: 'PUT',
           headers: {
             'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json',
             'Accept-Language': 'en', 'X-Idempotency-Key': approveKey,
