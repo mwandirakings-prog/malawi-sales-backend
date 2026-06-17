@@ -1462,7 +1462,7 @@ app.post('/api/billing/checkout', protect, adminOnly, async (req, res) => {
     const response = await new Promise((resolve, reject) => {
       const options = {
         hostname: 'api.onekhusa.com', port: 443,
-        path: '/live/v1/checkout/rtp/initiate', method: 'POST',
+        path: '/live/v1/checkout/embedded/initiate', method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Idempotency-Key': idempotencyKey, 'Content-Length': Buffer.byteLength(data) }
       };
       const req2 = https.request(options, (r) => {
