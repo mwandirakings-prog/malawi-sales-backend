@@ -1491,65 +1491,130 @@ app.post('/api/billing/checkout', protect, adminOnly, async (req, res) => {
 
 app.post('/api/billing/webhook', async (req, res) => {
   try {
-    const event = req.headers['x-onekhusa-webhook-event'];
+    console.log('Webhook received at /api/billing/webhook');
+    console.log('Full payload:', JSON.stringify(req.body, null, 2));
+
     const body = req.body;
-    console.log('OneKhusa Webhook:', event, JSON.stringify(body));
-    res.json({ success: true, received: true });
-    if (event !== 'payrequest.success' && event !== 'payment.success') return;
-    if (body.transactionStatusCode !== 'S') return;
-    const reference = body.metaData?.referenceNumber || body.sourceReferenceNumber;
-    if (!reference) return;
+
+    // 1. Check if this is a successful payment (ResponseCode 5100 = success)
+    if (body.ResponseCode !== '5100') {
+      console.log('Not a success response. Code:', body.ResponseCode);
+      return res.status(200).send('Webhook received');
+    }
+
+    // 2. Extract reference number from correct path
+    const reference = body.MetaData?.ReferenceNumber;
+    if (!reference) {
+      console.error('Missing ReferenceNumber in payload');
+      return res.status(200).send('Missing ReferenceNumber');
+    }
+
+    console.log('Payment successful for reference:', reference);
+
+    // 3. Find the pending billing record
     const billingResult = await pool.query(
-      `SELECT * FROM billing WHERE reference_number = $1 AND status = 'pending'`, [reference]
+      `SELECT * FROM billing WHERE reference_number = $1 AND status = 'pending'`,
+      [reference]
     );
-    if (billingResult.rows.length === 0) return;
+
+    if (billingResult.rows.length === 0) {
+      console.log('No pending billing record found for:', reference);
+      return res.status(200).send('Webhook received');
+    }
+
     const billing = billingResult.rows[0];
+    console.log('Found billing: Company', billing.company_id, 'Plan', billing.plan);
+
+    // 4. Calculate subscription expiry
     const expiresAt = new Date();
     expiresAt.setMonth(expiresAt.getMonth() + billing.months);
+
+    // 5. Update company subscription
     await pool.query(
-      `UPDATE companies SET subscription_status = 'active', subscription_expires_at = $1, active = true, daily_sales_count = 0, daily_sales_date = CURRENT_DATE WHERE id = $2`,
+      `UPDATE companies 
+       SET subscription_status = 'active', 
+           subscription_expires_at = $1, 
+           active = true, 
+           daily_sales_count = 0, 
+           daily_sales_date = CURRENT_DATE 
+       WHERE id = $2`,
       [expiresAt, billing.company_id]
     );
+    console.log('Company', billing.company_id, 'activated until', expiresAt);
+
+    // 6. Update billing record
     await pool.query(
-      `UPDATE billing SET status = 'paid', paid_at = NOW(), onekhusa_transaction_ref = $1 WHERE reference_number = $2`,
-      [body.transactionReferenceNumber || 'N/A', reference]
+      `UPDATE billing 
+       SET status = 'paid', 
+           paid_at = NOW(), 
+           onekhusa_transaction_ref = $1 
+       WHERE reference_number = $2`,
+      [body.TransactionId || 'N/A', reference]
     );
-    const adminResult = await pool.query(
-      `SELECT u.email, u.name, c.name as company_name FROM users u JOIN companies c ON c.id = u.company_id
-       WHERE u.company_id = $1 AND u.role = 'admin' LIMIT 1`,
-      [billing.company_id]
-    );
-    if (adminResult.rows.length > 0) {
-      const admin = adminResult.rows[0];
-      const html = `
-        <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;background:#FFF8F0;padding:32px;border-radius:12px;">
-          <div style="background:#3E1F00;padding:20px 32px;border-radius:10px;text-align:center;margin-bottom:24px;">
-            <div style="color:#FFB800;font-size:28px;font-weight:bold;letter-spacing:4px;">SABIAS</div>
-            <div style="color:#FF6B35;font-size:11px;margin-top:4px;">Payment Confirmation</div>
-          </div>
-          <div style="background:#E8F5E9;border-left:4px solid #2D6A4F;border-radius:10px;padding:20px;margin-bottom:20px;">
-            <div style="color:#2D6A4F;font-size:20px;font-weight:bold;margin-bottom:8px;">Payment Successful!</div>
-            <div style="color:#333;font-size:14px;">Hi ${admin.name}, your SABIAS subscription for <strong>${admin.company_name}</strong> is now active.</div>
-          </div>
-          <div style="background:white;border-radius:10px;padding:20px;border-left:4px solid #2D6A4F;margin-bottom:16px;">
-            <div style="color:#3E1F00;font-size:14px;margin:8px 0;">Plan: <strong>${billing.plan.toUpperCase()}</strong></div>
-            <div style="color:#3E1F00;font-size:14px;margin:8px 0;">Duration: <strong>${billing.months} Month(s)</strong></div>
-            <div style="color:#3E1F00;font-size:14px;margin:8px 0;">Amount: <strong>MWK ${new Intl.NumberFormat().format(billing.amount_mwk)}</strong></div>
-            <div style="color:#3E1F00;font-size:14px;margin:8px 0;">Expires: <strong>${expiresAt.toLocaleDateString()}</strong></div>
-            <div style="color:#3E1F00;font-size:14px;margin:8px 0;">Reference: <strong>${reference}</strong></div>
-          </div>
-          <div style="background:#3E1F00;border-radius:10px;padding:16px;text-align:center;">
-            <a href="https://sabiasanalytics.com" style="color:#FFB800;font-weight:bold;font-size:15px;text-decoration:none;">Login to SABIAS</a>
-          </div>
-        </div>`;
-      sendEmail(admin.email, `SABIAS Subscription Activated — ${admin.company_name}`, html)
-        .catch(err => console.error('Confirm email error:', err));
-      sendEmail('mwandirakings@gmail.com', `New Payment: ${admin.company_name} — MWK ${billing.amount_mwk}`,
-        `<p><strong>${admin.company_name}</strong> paid MWK ${billing.amount_mwk} for ${billing.plan} plan (${billing.months} month/s). Ref: ${reference}</p>`)
-        .catch(err => console.error('Notify email error:', err));
+    console.log('Billing', reference, 'marked as paid');
+
+    // 7. Send confirmation email to admin
+    try {
+      const adminResult = await pool.query(
+        `SELECT u.email, u.name, c.name as company_name 
+         FROM users u 
+         JOIN companies c ON c.id = u.company_id 
+         WHERE u.company_id = $1 AND u.role = 'admin' 
+         LIMIT 1`,
+        [billing.company_id]
+      );
+
+      if (adminResult.rows.length > 0) {
+        const admin = adminResult.rows[0];
+        const html = `
+          <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;background:#FFF8F0;padding:32px;border-radius:12px;">
+            <div style="background:#3E1F00;padding:20px 32px;border-radius:10px;text-align:center;margin-bottom:24px;">
+              <div style="color:#FFB800;font-size:28px;font-weight:bold;letter-spacing:4px;">SABIAS</div>
+              <div style="color:#FF6B35;font-size:11px;margin-top:4px;">Payment Confirmation</div>
+            </div>
+            <div style="background:#E8F5E9;border-left:4px solid #2D6A4F;border-radius:10px;padding:20px;margin-bottom:20px;">
+              <div style="color:#2D6A4F;font-size:20px;font-weight:bold;margin-bottom:8px;">Payment Successful!</div>
+              <div style="color:#333;font-size:14px;">Hi ${admin.name}, your SABIAS subscription for <strong>${admin.company_name}</strong> is now active.</div>
+            </div>
+            <div style="background:white;border-radius:10px;padding:20px;border-left:4px solid #2D6A4F;margin-bottom:16px;">
+              <div style="color:#3E1F00;font-size:14px;margin:8px 0;">Plan: <strong>${billing.plan.toUpperCase()}</strong></div>
+              <div style="color:#3E1F00;font-size:14px;margin:8px 0;">Duration: <strong>${billing.months} Month(s)</strong></div>
+              <div style="color:#3E1F00;font-size:14px;margin:8px 0;">Amount: <strong>MWK ${new Intl.NumberFormat().format(billing.amount_mwk)}</strong></div>
+              <div style="color:#3E1F00;font-size:14px;margin:8px 0;">Expires: <strong>${expiresAt.toLocaleDateString()}</strong></div>
+              <div style="color:#3E1F00;font-size:14px;margin:8px 0;">Reference: <strong>${reference}</strong></div>
+            </div>
+            <div style="background:#3E1F00;border-radius:10px;padding:16px;text-align:center;">
+              <a href="https://sabiasanalytics.com" style="color:#FFB800;font-weight:bold;font-size:15px;text-decoration:none;">Login to SABIAS</a>
+            </div>
+          </div>`;
+        sendEmail(admin.email, `SABIAS Subscription Activated — ${admin.company_name}`, html)
+          .catch(err => console.error('Confirm email error:', err));
+      }
+    } catch (emailErr) {
+      console.error('Email error:', emailErr.message);
     }
+
+    // 8. Notify you
+    try {
+      sendEmail('mwandirakings@gmail.com', 
+        `New Payment: ${reference} — MWK ${billing.amount_mwk}`,
+        `<p><strong>Company ID:</strong> ${billing.company_id}<br>
+         <strong>Plan:</strong> ${billing.plan}<br>
+         <strong>Amount:</strong> MWK ${billing.amount_mwk}<br>
+         <strong>Reference:</strong> ${reference}<br>
+         <strong>Transaction ID:</strong> ${body.TransactionId || 'N/A'}</p>`
+      ).catch(err => console.error('Notify email error:', err));
+    } catch (emailErr) {
+      console.error('Notification email error:', emailErr.message);
+    }
+
+    // 9. Return 200 OK
+    res.status(200).json({ success: true, received: true });
+
   } catch (err) {
     console.error('Webhook error:', err.message);
+    console.error('Stack:', err.stack);
+    res.status(200).json({ success: false, error: err.message });
   }
 });
 
