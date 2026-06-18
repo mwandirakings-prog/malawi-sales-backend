@@ -1439,8 +1439,7 @@ app.post('/api/billing/checkout', protect, adminOnly, async (req, res) => {
     }
     const amount = PLAN_PRICES[plan].monthly * (months || 1);
     const reference = generateReference();
-    const idempotencyKey = `${company_id}-${reference}-${Date.now()}`;
-    await pool.query(
+    const idempotencyKey = `SAB-${Date.now()}-${Math.random().toString(36).substring(7)}`;    await pool.query(
       `INSERT INTO billing (company_id, plan, months, amount_mwk, reference_number, status) VALUES ($1,$2,$3,$4,$5,'pending')`,
       [company_id, plan, months || 1, amount, reference]
     );
@@ -1458,6 +1457,9 @@ app.post('/api/billing/checkout', protect, adminOnly, async (req, res) => {
         callbackApiUrl: `https://api.sabiasanalytics.com/api/billing/webhook`
       }
     };
+
+  payload.route.callbackApiUrl = 'https://api.sabiasanalytics.com/api/billing/webhook';
+
     const data = JSON.stringify(payload);
     const response = await new Promise((resolve, reject) => {
       const options = {
