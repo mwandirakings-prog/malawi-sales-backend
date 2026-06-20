@@ -721,7 +721,9 @@ app.get('/api/regions', protect, async (req, res) => {
     const result = await pool.query(`
       SELECT region, SUM(quantity * unit_price) AS revenue,
         SUM(quantity * unit_price - quantity * unit_cost) AS profit, COUNT(*) AS records
-      FROM sales WHERE company_id = $1 GROUP BY region ORDER BY revenue DESC
+      FROM sales WHERE company_id = $1 
+      WHERE region IS NOT NULL AND region != '' AND region != 'POS'
+      GROUP BY region ORDER BY revenue DESC
     `, [company_id]);
     res.json({ success: true, data: result.rows });
   } catch (err) {
@@ -1374,7 +1376,9 @@ app.get('/api/v1/regions', apiKeyAuth, async (req, res) => {
       SELECT region, SUM(quantity * unit_price) AS revenue,
         SUM(quantity * unit_price - quantity * unit_cost) AS profit,
         COUNT(*) AS transactions, SUM(quantity) AS units_sold
-      FROM sales WHERE company_id = $1 GROUP BY region ORDER BY revenue DESC
+      FROM sales WHERE company_id = $1 
+      WHERE region IS NOT NULL AND region != '' AND region != 'POS'
+      GROUP BY region ORDER BY revenue DESC
     `, [req.company_id]);
     res.json({ success: true, count: result.rows.length, data: result.rows, company: req.apiKey.company_name });
   } catch (err) {
@@ -1439,7 +1443,8 @@ app.post('/api/billing/checkout', protect, adminOnly, async (req, res) => {
     }
     const amount = PLAN_PRICES[plan].monthly * (months || 1);
     const reference = generateReference();
-    const idempotencyKey = `SAB-${Date.now()}-${Math.random().toString(36).substring(7)}`;    await pool.query(
+    const idempotencyKey = `SAB-${Date.now()}-${Math.random().toString(36).substring(7)}`;
+    await pool.query(
       `INSERT INTO billing (company_id, plan, months, amount_mwk, reference_number, status) VALUES ($1,$2,$3,$4,$5,'pending')`,
       [company_id, plan, months || 1, amount, reference]
     );
@@ -1458,7 +1463,7 @@ app.post('/api/billing/checkout', protect, adminOnly, async (req, res) => {
       }
     };
 
-  payload.route.callbackApiUrl = 'https://api.sabiasanalytics.com/api/billing/webhook';
+    payload.route.callbackApiUrl = 'https://api.sabiasanalytics.com/api/billing/webhook';
 
     const data = JSON.stringify(payload);
     const response = await new Promise((resolve, reject) => {
@@ -1498,7 +1503,7 @@ app.post('/api/billing/webhook', async (req, res) => {
 
     const body = req.body;
 
-    // 1. Check if this is a successful payment (ResponseCode 5100 = success)
+    // 1. Check if this is a successful payment
     if (body.ResponseCode !== 'S100' && body.ResponseCode !== 'S') {
       console.log('Not a success response. Code:', body.ResponseCode);
       return res.status(200).send('Webhook received');
@@ -1981,12 +1986,11 @@ app.post('/api/pos/transactions', protect, noViewer, checkTransactionLimit, asyn
           sale_date, product, category, region, customer,
           quantity, unit_price, unit_cost, salesperson, payment, company_id, approval_status
         ) VALUES (
-          NOW(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'approved'
+          NOW(), $1, $2, NULL, $3, $4, $5, $6, $7, $8, $9, 'approved'
         )`,
         [
           item.product,
           item.category || 'POS Sale',
-          'POS',
           customer_name || 'Walk-in',
           item.quantity,
           item.unit_price,
