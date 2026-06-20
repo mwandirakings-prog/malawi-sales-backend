@@ -1895,6 +1895,16 @@ app.put('/api/pos/sessions/:id/close', protect, adminOnly, async (req, res) => {
     const { closing_cash } = req.body;
     const company_id = req.user.company_id;
     
+    // First check if session exists and is open
+    const sessionCheck = await pool.query(
+      `SELECT * FROM pos_sessions WHERE id = $1 AND company_id = $2 AND status = 'open'`,
+      [id, company_id]
+    );
+    
+    if (sessionCheck.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Session not found or already closed' });
+    }
+    
     // Get session totals
     const totals = await pool.query(
       `SELECT COALESCE(SUM(total), 0) as total_revenue,
@@ -1927,14 +1937,14 @@ app.put('/api/pos/sessions/:id/close', protect, adminOnly, async (req, res) => {
        RETURNING *`,
       [
         closing_cash || 0,
-        totals.rows[0].total_revenue,
-        totals.rows[0].cash_total,
-        totals.rows[0].airtel_total,
-        totals.rows[0].tnm_total,
+        totals.rows[0].total_revenue || 0,
+        totals.rows[0].cash_total || 0,
+        totals.rows[0].airtel_total || 0,
+        totals.rows[0].tnm_total || 0,
         totals.rows[0].bank_total || 0,
         totals.rows[0].voucher_total || 0,
-        totals.rows[0].total_discounts,
-        totals.rows[0].total_transactions,
+        totals.rows[0].total_discounts || 0,
+        totals.rows[0].total_transactions || 0,
         id, company_id
       ]
     );
