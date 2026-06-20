@@ -1859,7 +1859,7 @@ app.post('/api/pos/sessions/open', protect, adminOnly, async (req, res) => {
     );
     
     const result = await pool.query(
-      `INSERT INTO pos_sessions (company_id, opened_by, opening_cash, opened_at)
+      INSERT INTO pos_sessions (company_id, cashier_id, opening_cash, opened_at)
        VALUES ($1, $2, $3, NOW()) RETURNING *`,
       [company_id, req.user.id, opening_cash || 0]
     );
