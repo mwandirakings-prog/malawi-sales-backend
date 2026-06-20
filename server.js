@@ -1839,6 +1839,201 @@ app.post('/api/disbursements/webhook', async (req, res) => {
   }
 });
 
+// ══════════════════════════════════════════════════════════
+//  POS (POINT OF SALE) ROUTES
+// ══════════════════════════════════════════════════════════
+
+// ── POS SESSIONS ──────────────────────────────────────────
+
+// Open session
+app.post('/api/pos/sessions/open', protect, adminOnly, async (req, res) => {
+  try {
+    const company_id = req.user.company_id;
+    const { opening_cash } = req.body;
+    
+    // Close any open sessions first
+    await pool.query(
+      `UPDATE pos_sessions SET closed_at = NOW() 
+       WHERE company_id = $1 AND closed_at IS NULL`,
+      [company_id]
+    );
+    
+    const result = await pool.query(
+      `INSERT INTO pos_sessions (company_id, opened_by, opening_cash, opened_at)
+       VALUES ($1, $2, $3, NOW()) RETURNING *`,
+      [company_id, req.user.id, opening_cash || 0]
+    );
+    
+    res.json({ success: true, data: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Close session
+app.put('/api/pos/sessions/:id/close', protect, adminOnly, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { closing_cash } = req.body;
+    const company_id = req.user.company_id;
+    
+    // Get session totals
+    const totals = await pool.query(
+      `SELECT COALESCE(SUM(total), 0) as total_revenue,
+              COALESCE(SUM(CASE WHEN payment_method = 'Cash' THEN total ELSE 0 END), 0) as cash_total,
+              COALESCE(SUM(CASE WHEN payment_method = 'Airtel Money' THEN total ELSE 0 END), 0) as airtel_total,
+              COALESCE(SUM(CASE WHEN payment_method = 'TNM Mpamba' THEN total ELSE 0 END), 0) as tnm_total,
+              COALESCE(SUM(CASE WHEN payment_method = 'Bank transfer' THEN total ELSE 0 END), 0) as bank_total,
+              COALESCE(SUM(CASE WHEN payment_method = 'Voucher' THEN total ELSE 0 END), 0) as voucher_total,
+              COALESCE(SUM(discount), 0) as total_discounts,
+              COUNT(*) as total_transactions
+       FROM pos_transactions 
+       WHERE session_id = $1 AND company_id = $2`,
+      [id, company_id]
+    );
+    
+    const result = await pool.query(
+      `UPDATE pos_sessions 
+       SET closed_at = NOW(), 
+           closing_cash = $1,
+           total_revenue = $2,
+           cash_total = $3,
+           airtel_total = $4,
+           tnm_total = $5,
+           bank_total = $6,
+           voucher_total = $7,
+           total_discounts = $8,
+           total_transactions = $9
+       WHERE id = $10 AND company_id = $11
+       RETURNING *`,
+      [
+        closing_cash || 0,
+        totals.rows[0].total_revenue,
+        totals.rows[0].cash_total,
+        totals.rows[0].airtel_total,
+        totals.rows[0].tnm_total,
+        totals.rows[0].bank_total || 0,
+        totals.rows[0].voucher_total || 0,
+        totals.rows[0].total_discounts,
+        totals.rows[0].total_transactions,
+        id, company_id
+      ]
+    );
+    
+    res.json({ success: true, data: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── POS TRANSACTIONS ──────────────────────────────────────
+
+// Record sale
+app.post('/api/pos/transactions', protect, noViewer, checkTransactionLimit, async (req, res) => {
+  try {
+    const company_id = req.user.company_id;
+    const { session_id, items, payment_method, discount, customer_name, customer_phone, offline_reference } = req.body;
+    
+    if (!session_id || !items || items.length === 0) {
+      return res.status(400).json({ success: false, error: 'Session and items required' });
+    }
+    
+    // Calculate totals
+    let subtotal = 0;
+    for (const item of items) {
+      subtotal += item.quantity * item.unit_price;
+    }
+    const total = subtotal - (parseFloat(discount) || 0);
+    const reference = offline_reference || 'POS' + Date.now().toString().slice(-9);
+    
+    // Insert transaction
+    const txResult = await pool.query(
+      `INSERT INTO pos_transactions 
+       (company_id, session_id, reference_number, items, subtotal, discount, total, 
+        payment_method, customer_name, customer_phone, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+       RETURNING *`,
+      [company_id, session_id, reference, JSON.stringify(items), subtotal, discount || 0, total, 
+       payment_method || 'Cash', customer_name || 'Walk-in', customer_phone || '']
+    );
+    
+    // Update inventory
+    for (const item of items) {
+      await pool.query(
+        `UPDATE inventory SET quantity_in_stock = GREATEST(quantity_in_stock - $1, 0), updated_at = NOW()
+         WHERE LOWER(product) = LOWER($2) AND company_id = $3`,
+        [item.quantity, item.product, company_id]
+      );
+    }
+    
+    // Update session transaction count
+    await pool.query(
+      `UPDATE pos_sessions SET total_transactions = total_transactions + 1
+       WHERE id = $1`,
+      [session_id]
+    );
+    
+    res.json({ success: true, data: txResult.rows[0], reference });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Get transactions
+app.get('/api/pos/transactions', protect, async (req, res) => {
+  try {
+    const company_id = req.user.company_id;
+    const { session_id, date } = req.query;
+    
+    let query = `SELECT * FROM pos_transactions WHERE company_id = $1`;
+    const params = [company_id];
+    let p = 1;
+    
+    if (session_id) {
+      p++; query += ` AND session_id = $${p}`;
+      params.push(session_id);
+    }
+    if (date) {
+      p++; query += ` AND DATE(created_at) = $${p}`;
+      params.push(date);
+    }
+    
+    query += ` ORDER BY created_at DESC`;
+    const result = await pool.query(query, params);
+    res.json({ success: true, data: result.rows });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── POS SUMMARY ──────────────────────────────────────────
+
+app.get('/api/pos/summary', protect, async (req, res) => {
+  try {
+    const company_id = req.user.company_id;
+    const { date } = req.query;
+    const targetDate = date || new Date().toISOString().split('T')[0];
+    
+    const result = await pool.query(
+      `SELECT COUNT(*) as total_transactions,
+              COALESCE(SUM(total), 0) as total_revenue,
+              COALESCE(SUM(CASE WHEN payment_method = 'Cash' THEN total ELSE 0 END), 0) as cash_total,
+              COALESCE(SUM(CASE WHEN payment_method = 'Airtel Money' THEN total ELSE 0 END), 0) as airtel_total,
+              COALESCE(SUM(CASE WHEN payment_method = 'TNM Mpamba' THEN total ELSE 0 END), 0) as tnm_total,
+              COALESCE(SUM(CASE WHEN payment_method = 'Bank transfer' THEN total ELSE 0 END), 0) as bank_total,
+              COALESCE(SUM(CASE WHEN payment_method = 'Voucher' THEN total ELSE 0 END), 0) as voucher_total,
+              COALESCE(SUM(discount), 0) as total_discounts
+       FROM pos_transactions 
+       WHERE company_id = $1 AND DATE(created_at) = $2`,
+      [company_id, targetDate]
+    );
+    
+    res.json({ success: true, data: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ── GLOBAL ERROR HANDLER ──────────────────────────────────
 app.use((err, req, res, next) => {
   console.error('Unhandled error:', err.message);
