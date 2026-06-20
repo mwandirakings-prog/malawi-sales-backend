@@ -1843,9 +1843,23 @@ app.post('/api/disbursements/webhook', async (req, res) => {
 //  POS (POINT OF SALE) ROUTES
 // ══════════════════════════════════════════════════════════
 
-// ── POS SESSIONS ──────────────────────────────────────────
+// ── GET ACTIVE SESSION ──────────────────────────────────
+app.get('/api/pos/sessions/active', protect, async (req, res) => {
+  try {
+    const company_id = req.user.company_id;
+    const result = await pool.query(
+      `SELECT * FROM pos_sessions 
+       WHERE company_id = $1 AND status = 'open'
+       ORDER BY opened_at DESC LIMIT 1`,
+      [company_id]
+    );
+    res.json({ success: true, data: result.rows[0] || null });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
 
-// Open session
+// ── OPEN SESSION ──────────────────────────────────────────
 app.post('/api/pos/sessions/open', protect, adminOnly, async (req, res) => {
   try {
     const company_id = req.user.company_id;
@@ -1859,17 +1873,19 @@ app.post('/api/pos/sessions/open', protect, adminOnly, async (req, res) => {
     );
     
     const result = await pool.query(
-       `INSERT INTO pos_sessions (company_id, cashier_id, opening_cash, opened_at)       VALUES ($1, $2, $3, NOW()) RETURNING *`,
+      `INSERT INTO pos_sessions (company_id, cashier_id, opening_cash, opened_at, status)
+       VALUES ($1, $2, $3, NOW(), 'open') RETURNING *`,
       [company_id, req.user.id, opening_cash || 0]
     );
     
     res.json({ success: true, data: result.rows[0] });
   } catch (err) {
+    console.error('Open session error:', err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// Close session
+// ── CLOSE SESSION ─────────────────────────────────────────
 app.put('/api/pos/sessions/:id/close', protect, adminOnly, async (req, res) => {
   try {
     const { id } = req.params;
@@ -1894,6 +1910,7 @@ app.put('/api/pos/sessions/:id/close', protect, adminOnly, async (req, res) => {
     const result = await pool.query(
       `UPDATE pos_sessions 
        SET closed_at = NOW(), 
+           status = 'closed',
            closing_cash = $1,
            total_revenue = $2,
            cash_total = $3,
@@ -1921,6 +1938,7 @@ app.put('/api/pos/sessions/:id/close', protect, adminOnly, async (req, res) => {
     
     res.json({ success: true, data: result.rows[0] });
   } catch (err) {
+    console.error('Close session error:', err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -1945,18 +1963,42 @@ app.post('/api/pos/transactions', protect, noViewer, checkTransactionLimit, asyn
     const total = subtotal - (parseFloat(discount) || 0);
     const reference = offline_reference || 'POS' + Date.now().toString().slice(-9);
     
-    // Insert transaction
+    // ── 1. INSERT INTO pos_transactions ──
     const txResult = await pool.query(
       `INSERT INTO pos_transactions 
-       (company_id, session_id, reference_number, items, subtotal, discount, total, 
+       (company_id, session_id, cashier_id, reference_number, items, subtotal, discount, total, 
         payment_method, customer_name, customer_phone, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
        RETURNING *`,
-      [company_id, session_id, reference, JSON.stringify(items), subtotal, discount || 0, total, 
+      [company_id, session_id, req.user.id, reference, JSON.stringify(items), subtotal, discount || 0, total, 
        payment_method || 'Cash', customer_name || 'Walk-in', customer_phone || '']
     );
     
-    // Update inventory
+    // ── 2. INSERT INTO sales table (for Analytics, Reports, Forecasting) ──
+    for (const item of items) {
+      await pool.query(
+        `INSERT INTO sales (
+          sale_date, product, category, region, customer,
+          quantity, unit_price, unit_cost, salesperson, payment, company_id, approval_status
+        ) VALUES (
+          NOW(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'approved'
+        )`,
+        [
+          item.product,
+          item.category || 'POS Sale',
+          'POS',
+          customer_name || 'Walk-in',
+          item.quantity,
+          item.unit_price,
+          item.unit_cost || 0,
+          req.user.name || 'POS Cashier',
+          payment_method || 'Cash',
+          company_id
+        ]
+      );
+    }
+    
+    // ── 3. UPDATE inventory ──
     for (const item of items) {
       await pool.query(
         `UPDATE inventory SET quantity_in_stock = GREATEST(quantity_in_stock - $1, 0), updated_at = NOW()
@@ -1965,20 +2007,27 @@ app.post('/api/pos/transactions', protect, noViewer, checkTransactionLimit, asyn
       );
     }
     
-    // Update session transaction count
+    // ── 4. UPDATE session transaction count ──
     await pool.query(
       `UPDATE pos_sessions SET total_transactions = total_transactions + 1
        WHERE id = $1`,
       [session_id]
     );
     
-    res.json({ success: true, data: txResult.rows[0], reference });
+    res.json({ 
+      success: true, 
+      data: txResult.rows[0], 
+      reference,
+      message: 'Sale recorded and synced to all modules'
+    });
+    
   } catch (err) {
+    console.error('POS transaction error:', err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// Get transactions
+// ── GET TRANSACTIONS ──────────────────────────────────────
 app.get('/api/pos/transactions', protect, async (req, res) => {
   try {
     const company_id = req.user.company_id;
@@ -2006,7 +2055,6 @@ app.get('/api/pos/transactions', protect, async (req, res) => {
 });
 
 // ── POS SUMMARY ──────────────────────────────────────────
-
 app.get('/api/pos/summary', protect, async (req, res) => {
   try {
     const company_id = req.user.company_id;
