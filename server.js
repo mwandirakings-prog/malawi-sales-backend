@@ -1863,7 +1863,7 @@ app.get('/api/pos/sessions/active', protect, async (req, res) => {
 });
 
 // ── OPEN SESSION ──────────────────────────────────────────
-app.post('/api/pos/sessions/open', protect, adminOnly, async (req, res) => {
+app.post('/api/pos/sessions/open', protect, async (req, res) => {
   try {
     const company_id = req.user.company_id;
     const { opening_cash } = req.body;
@@ -1889,7 +1889,7 @@ app.post('/api/pos/sessions/open', protect, adminOnly, async (req, res) => {
 });
 
 // ── CLOSE SESSION ─────────────────────────────────────────
-app.put('/api/pos/sessions/:id/close', protect, adminOnly, async (req, res) => {
+app.put('/api/pos/sessions/:id/close', protect, async (req, res) => {
   try {
     const { id } = req.params;
     const { closing_cash } = req.body;
