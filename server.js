@@ -1499,7 +1499,7 @@ app.post('/api/billing/webhook', async (req, res) => {
     const body = req.body;
 
     // 1. Check if this is a successful payment (ResponseCode 5100 = success)
-    if (body.ResponseCode !== '5100') {
+    if (body.ResponseCode !== 'S100' && body.ResponseCode !== 'S') {
       console.log('Not a success response. Code:', body.ResponseCode);
       return res.status(200).send('Webhook received');
     }
