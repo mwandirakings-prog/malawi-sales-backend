@@ -1853,14 +1853,13 @@ app.post('/api/pos/sessions/open', protect, adminOnly, async (req, res) => {
     
     // Close any open sessions first
     await pool.query(
-      `UPDATE pos_sessions SET closed_at = NOW() 
-       WHERE company_id = $1 AND closed_at IS NULL`,
+      `UPDATE pos_sessions SET closed_at = NOW(), status = 'closed'
+       WHERE company_id = $1 AND status = 'open'`,
       [company_id]
     );
     
     const result = await pool.query(
-      INSERT INTO pos_sessions (company_id, cashier_id, opening_cash, opened_at)
-       VALUES ($1, $2, $3, NOW()) RETURNING *`,
+       `INSERT INTO pos_sessions (company_id, cashier_id, opening_cash, opened_at)       VALUES ($1, $2, $3, NOW()) RETURNING *`,
       [company_id, req.user.id, opening_cash || 0]
     );
     
