@@ -721,8 +721,7 @@ app.get('/api/regions', protect, async (req, res) => {
     const result = await pool.query(`
       SELECT region, SUM(quantity * unit_price) AS revenue,
         SUM(quantity * unit_price - quantity * unit_cost) AS profit, COUNT(*) AS records
-      FROM sales WHERE company_id = $1 
-      WHERE region IS NOT NULL AND region != '' AND region != 'POS'
+      FROM sales WHERE company_id = $1
       GROUP BY region ORDER BY revenue DESC
     `, [company_id]);
     res.json({ success: true, data: result.rows });
@@ -1376,8 +1375,7 @@ app.get('/api/v1/regions', apiKeyAuth, async (req, res) => {
       SELECT region, SUM(quantity * unit_price) AS revenue,
         SUM(quantity * unit_price - quantity * unit_cost) AS profit,
         COUNT(*) AS transactions, SUM(quantity) AS units_sold
-      FROM sales WHERE company_id = $1 
-      WHERE region IS NOT NULL AND region != '' AND region != 'POS'
+      FROM sales WHERE company_id = $1
       GROUP BY region ORDER BY revenue DESC
     `, [req.company_id]);
     res.json({ success: true, count: result.rows.length, data: result.rows, company: req.apiKey.company_name });
