@@ -2044,10 +2044,18 @@ app.get('/api/pos/transactions', protect, async (req, res) => {
   try {
     const company_id = req.user.company_id;
     const { session_id, date } = req.query;
+    const user_id = req.user.id;
+    const role = req.user.role;
     
     let query = `SELECT * FROM pos_transactions WHERE company_id = $1`;
     const params = [company_id];
     let p = 1;
+    
+    // If not admin, filter by cashier_id
+    if (role !== 'admin') {
+      p++; query += ` AND cashier_id = $${p}`;
+      params.push(user_id);
+    }
     
     if (session_id) {
       p++; query += ` AND session_id = $${p}`;
@@ -2072,9 +2080,11 @@ app.get('/api/pos/summary', protect, async (req, res) => {
     const company_id = req.user.company_id;
     const { date } = req.query;
     const targetDate = date || new Date().toISOString().split('T')[0];
+    const user_id = req.user.id;
+    const role = req.user.role;
     
-    const result = await pool.query(
-      `SELECT COUNT(*) as total_transactions,
+    let query = `
+      SELECT COUNT(*) as total_transactions,
               COALESCE(SUM(total), 0) as total_revenue,
               COALESCE(SUM(CASE WHEN payment_method = 'Cash' THEN total ELSE 0 END), 0) as cash_total,
               COALESCE(SUM(CASE WHEN payment_method = 'Airtel Money' THEN total ELSE 0 END), 0) as airtel_total,
@@ -2083,10 +2093,17 @@ app.get('/api/pos/summary', protect, async (req, res) => {
               COALESCE(SUM(CASE WHEN payment_method = 'Voucher' THEN total ELSE 0 END), 0) as voucher_total,
               COALESCE(SUM(discount), 0) as total_discounts
        FROM pos_transactions 
-       WHERE company_id = $1 AND DATE(created_at) = $2`,
-      [company_id, targetDate]
-    );
+       WHERE company_id = $1 AND DATE(created_at) = $2
+    `;
+    const params = [company_id, targetDate];
     
+    // If not admin, filter by cashier_id
+    if (role !== 'admin') {
+      query += ` AND cashier_id = $3`;
+      params.push(user_id);
+    }
+    
+    const result = await pool.query(query, params);
     res.json({ success: true, data: result.rows[0] });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
