@@ -2110,6 +2110,263 @@ app.get('/api/pos/summary', protect, async (req, res) => {
   }
 });
 
+// ══════════════════════════════════════════════════════════
+//  LOYALTY ROUTES
+// ══════════════════════════════════════════════════════════
+
+// Get customer loyalty info
+app.get('/api/loyalty/customer', protect, async (req, res) => {
+  try {
+    const { phone } = req.query;
+    const company_id = req.user.company_id;
+    
+    if (!phone) {
+      return res.status(400).json({ success: false, error: 'Phone number required' });
+    }
+    
+    const result = await pool.query(
+      `SELECT id, name, phone, points, created_at 
+       FROM loyalty_customers 
+       WHERE phone = $1 AND company_id = $2`,
+      [phone, company_id]
+    );
+    
+    if (result.rows.length === 0) {
+      // Create new customer
+      const newCustomer = await pool.query(
+        `INSERT INTO loyalty_customers (company_id, name, phone, points) 
+         VALUES ($1, $2, $3, 0) RETURNING *`,
+        [company_id, 'Walk-in', phone]
+      );
+      return res.json({ success: true, data: newCustomer.rows[0] });
+    }
+    
+    res.json({ success: true, data: result.rows[0] });
+  } catch (err) {
+    console.error('Loyalty customer error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Earn loyalty points
+app.post('/api/loyalty/earn', protect, async (req, res) => {
+  try {
+    const { phone, amount } = req.body;
+    const company_id = req.user.company_id;
+    
+    if (!phone || !amount) {
+      return res.status(400).json({ success: false, error: 'Phone and amount required' });
+    }
+    
+    // 1 point per MWK 100 spent
+    const pointsToAdd = Math.floor(amount / 100);
+    
+    const result = await pool.query(
+      `UPDATE loyalty_customers 
+       SET points = points + $1, updated_at = NOW() 
+       WHERE phone = $2 AND company_id = $3 
+       RETURNING *`,
+      [pointsToAdd, phone, company_id]
+    );
+    
+    if (result.rows.length === 0) {
+      // Create customer if not exists
+      const newCustomer = await pool.query(
+        `INSERT INTO loyalty_customers (company_id, name, phone, points) 
+         VALUES ($1, $2, $3, $4) RETURNING *`,
+        [company_id, 'Walk-in', phone, pointsToAdd]
+      );
+      return res.json({ success: true, data: newCustomer.rows[0] });
+    }
+    
+    res.json({ success: true, data: result.rows[0] });
+  } catch (err) {
+    console.error('Loyalty earn error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ══════════════════════════════════════════════════════════
+//  REPRINT RECEIPTS
+// ══════════════════════════════════════════════════════════
+
+app.get('/api/pos/receipts', protect, async (req, res) => {
+  try {
+    const { search } = req.query;
+    const company_id = req.user.company_id;
+    const user_id = req.user.id;
+    const role = req.user.role;
+    
+    let query = `SELECT * FROM pos_transactions WHERE company_id = $1`;
+    const params = [company_id];
+    let p = 1;
+    
+    // If not admin, filter by cashier_id
+    if (role !== 'admin') {
+      p++; query += ` AND cashier_id = $${p}`;
+      params.push(user_id);
+    }
+    
+    if (search) {
+      p++; query += ` AND (reference_number ILIKE $${p} OR customer_name ILIKE $${p})`;
+      params.push(`%${search}%`);
+    }
+    
+    query += ` ORDER BY created_at DESC LIMIT 50`;
+    const result = await pool.query(query, params);
+    res.json({ success: true, data: result.rows });
+  } catch (err) {
+    console.error('Reprint search error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ══════════════════════════════════════════════════════════
+//  BRANCH REPORTS
+// ══════════════════════════════════════════════════════════
+
+app.get('/api/pos/branch-reports', protect, async (req, res) => {
+  try {
+    const company_id = req.user.company_id;
+    const user_id = req.user.id;
+    const role = req.user.role;
+    
+    let query = `
+      SELECT 
+        COALESCE(NULLIF(region, ''), 'Unknown') as branch,
+        COUNT(*) as transactions,
+        COALESCE(SUM(total), 0) as revenue,
+        COALESCE(SUM(discount), 0) as discounts
+      FROM pos_transactions 
+      WHERE company_id = $1
+    `;
+    const params = [company_id];
+    let p = 1;
+    
+    if (role !== 'admin') {
+      p++; query += ` AND cashier_id = $${p}`;
+      params.push(user_id);
+    }
+    
+    query += ` GROUP BY region ORDER BY revenue DESC`;
+    const result = await pool.query(query, params);
+    res.json({ success: true, data: result.rows });
+  } catch (err) {
+    console.error('Branch reports error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ══════════════════════════════════════════════════════════
+//  TILL REPORTS
+// ══════════════════════════════════════════════════════════
+
+app.get('/api/pos/till-reports', protect, async (req, res) => {
+  try {
+    const company_id = req.user.company_id;
+    const user_id = req.user.id;
+    const role = req.user.role;
+    
+    let query = `
+      SELECT 
+        s.id as till_id,
+        u.name as cashier_name,
+        COUNT(pt.id) as total_transactions,
+        COALESCE(SUM(pt.total), 0) as total_revenue,
+        s.status,
+        s.opened_at,
+        s.closed_at
+      FROM pos_sessions s
+      LEFT JOIN users u ON u.id = s.cashier_id
+      LEFT JOIN pos_transactions pt ON pt.session_id = s.id
+      WHERE s.company_id = $1
+    `;
+    const params = [company_id];
+    let p = 1;
+    
+    if (role !== 'admin') {
+      p++; query += ` AND s.cashier_id = $${p}`;
+      params.push(user_id);
+    }
+    
+    query += ` GROUP BY s.id, u.name, s.status, s.opened_at, s.closed_at
+               ORDER BY s.opened_at DESC LIMIT 20`;
+    const result = await pool.query(query, params);
+    res.json({ success: true, data: result.rows });
+  } catch (err) {
+    console.error('Till reports error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ══════════════════════════════════════════════════════════
+//  RECONCILIATION
+// ══════════════════════════════════════════════════════════
+
+app.get('/api/pos/reconciliation', protect, async (req, res) => {
+  try {
+    const company_id = req.user.company_id;
+    const user_id = req.user.id;
+    const role = req.user.role;
+    
+    let query = `
+      SELECT 
+        COALESCE(SUM(total), 0) as expected_cash,
+        COALESCE(SUM(CASE WHEN payment_method = 'Cash' THEN total ELSE 0 END), 0) as actual_cash,
+        COALESCE(SUM(CASE WHEN payment_method = 'Cash' THEN total ELSE 0 END), 0) - COALESCE(SUM(total), 0) as variance
+      FROM pos_transactions 
+      WHERE company_id = $1
+        AND DATE(created_at) = CURRENT_DATE
+    `;
+    const params = [company_id];
+    let p = 1;
+    
+    if (role !== 'admin') {
+      p++; query += ` AND cashier_id = $${p}`;
+      params.push(user_id);
+    }
+    
+    const result = await pool.query(query, params);
+    res.json({ success: true, data: result.rows[0] || { expected_cash: 0, actual_cash: 0, variance: 0 } });
+  } catch (err) {
+    console.error('Reconciliation error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ══════════════════════════════════════════════════════════
+//  MULTI-TILL DASHBOARD
+// ══════════════════════════════════════════════════════════
+
+app.get('/api/pos/multi-till', protect, async (req, res) => {
+  try {
+    const company_id = req.user.company_id;
+    
+    const result = await pool.query(
+      `SELECT 
+        s.id as till_id,
+        u.name as cashier_name,
+        s.status,
+        s.opened_at,
+        s.opening_cash,
+        COUNT(pt.id) as total_transactions,
+        COALESCE(SUM(pt.total), 0) as total_revenue,
+        COALESCE(SUM(CASE WHEN pt.payment_method = 'Cash' THEN pt.total ELSE 0 END), 0) as cash_total
+       FROM pos_sessions s
+       LEFT JOIN users u ON u.id = s.cashier_id
+       LEFT JOIN pos_transactions pt ON pt.session_id = s.id
+       WHERE s.company_id = $1 AND s.status = 'open'
+       GROUP BY s.id, u.name, s.status, s.opened_at, s.opening_cash
+       ORDER BY s.opened_at DESC`,
+      [company_id]
+    );
+    res.json({ success: true, data: result.rows });
+  } catch (err) {
+    console.error('Multi-till error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ── GLOBAL ERROR HANDLER ──────────────────────────────────
 app.use((err, req, res, next) => {
   console.error('Unhandled error:', err.message);
