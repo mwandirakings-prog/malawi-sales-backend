@@ -203,28 +203,77 @@ const PLAN_PRICES = {
     name: 'Starter',
     users: 1,
     daily_limit: 10,
-    features: ['10 transactions/day', 'POS Access', 'Offline Mode', 'Basic Sales', '1 User', 'Email Support']
+    features: [
+      '10 transactions/day', 
+      'POS Access', 
+      'Offline Mode', 
+      'Inventory Management',
+      'Basic Dashboard',
+      'Basic KPI Analytics',
+      '1 Admin + 1 Salesperson',
+      'Unlimited Viewers',
+      'Email Support'
+    ]
   },
   professional: { 
     monthly: 10000, 
     name: 'Professional',
     users: 2,
-    daily_limit: 50,
-    features: ['50 transactions/day', 'Full POS', 'Offline Mode', 'Inventory Management', 'Barcode Scanner', 'QR Receipts', '2 Users', 'Email + WhatsApp Support']
+    daily_limit: 999999,
+    features: [
+      'Unlimited transactions', 
+      'Full POS', 
+      'Offline Mode', 
+      'Inventory Management', 
+      'Barcode Scanner', 
+      'QR Receipts', 
+      'Full Analytics',
+      'Category & Region Analytics',
+      'Product Performance',
+      'Salesperson Performance',
+      'CSV/PDF Reports Export',
+      'Basic Forecasting',
+      '2 Admins + 2 Salespersons',
+      'Unlimited Viewers',
+      'Email + WhatsApp Support'
+    ]
   },
   enterprise: { 
     monthly: 50000, 
     name: 'Enterprise',
     users: 10,
     daily_limit: 999999,
-    features: ['Unlimited transactions', 'Full POS', 'Offline Mode', 'Inventory Management', 'Barcode Scanner', 'QR Receipts', 'Loyalty Program', 'Branch Reports', 'Till Reports', 'Reconciliation', 'Multi-Till Dashboard', '10+ Users', 'API Access', 'Priority Support']
+    features: [
+      'Unlimited transactions', 
+      'Full POS', 
+      'Offline Mode', 
+      'Inventory Management', 
+      'Barcode Scanner', 
+      'QR Receipts', 
+      'Loyalty Program', 
+      'Branch Reports', 
+      'Till Reports', 
+      'Reconciliation', 
+      'Multi-Till Dashboard',
+      'Advanced Analytics',
+      'Customer Analytics',
+      'Loyalty Analytics',
+      'Advanced Forecasting',
+      'Stock Forecasting',
+      'Seasonal Trends',
+      'Demand Prediction',
+      '10+ Admins + 10+ Salespersons',
+      'Unlimited Viewers',
+      'API Access', 
+      'Priority Support'
+    ]
   }
 };
 
 // Helper function to get daily limit
 const getDailyLimit = (plan) => {
   if (plan === 'starter') return 10;
-  if (plan === 'professional') return 50;
+  if (plan === 'professional') return 999999;
   if (plan === 'enterprise') return 999999;
   return 10; // Default for trial
 };
