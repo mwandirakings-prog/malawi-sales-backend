@@ -2220,7 +2220,6 @@ app.get('/api/pos/receipts', protect, async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
-
 // ══════════════════════════════════════════════════════════
 //  BRANCH REPORTS
 // ══════════════════════════════════════════════════════════
@@ -2231,28 +2230,70 @@ app.get('/api/pos/branch-reports', protect, async (req, res) => {
     const user_id = req.user.id;
     const role = req.user.role;
     
-    let query = `
-      SELECT 
-        COALESCE(NULLIF(region, ''), 'Unknown') as branch,
-        COUNT(*) as transactions,
-        COALESCE(SUM(total), 0) as revenue,
-        COALESCE(SUM(discount), 0) as discounts
-      FROM pos_transactions 
-      WHERE company_id = $1
-    `;
+    console.log('Branch reports called for company:', company_id);
+    
+    // Check if branch column exists in pos_transactions
+    const columnCheck = await pool.query(`
+      SELECT EXISTS (
+        SELECT 1 
+        FROM information_schema.columns 
+        WHERE table_name = 'pos_transactions' AND column_name = 'branch'
+      );
+    `);
+    
+    console.log('Branch column exists?', columnCheck.rows[0].exists);
+    
+    let query;
     const params = [company_id];
     let p = 1;
     
+    if (columnCheck.rows[0].exists) {
+      // Branch column exists - use it
+      query = `
+        SELECT 
+          COALESCE(NULLIF(pt.branch, ''), 'Main Branch') as branch,
+          COUNT(*) as transactions,
+          COALESCE(SUM(pt.total), 0) as revenue,
+          COALESCE(SUM(pt.discount), 0) as discounts
+        FROM pos_transactions pt
+        WHERE pt.company_id = $1
+      `;
+    } else {
+      // Branch column doesn't exist - use cashier name as branch
+      query = `
+        SELECT 
+          COALESCE(u.name, 'Unknown') as branch,
+          COUNT(*) as transactions,
+          COALESCE(SUM(pt.total), 0) as revenue,
+          COALESCE(SUM(pt.discount), 0) as discounts
+        FROM pos_transactions pt
+        LEFT JOIN users u ON u.id = pt.cashier_id
+        WHERE pt.company_id = $1
+      `;
+    }
+    
+    // If not admin, filter by cashier_id
     if (role !== 'admin') {
-      p++; query += ` AND cashier_id = $${p}`;
+      p++;
+      query += ` AND pt.cashier_id = $${p}`;
       params.push(user_id);
     }
     
-    query += ` GROUP BY region ORDER BY revenue DESC`;
+    // Group by branch or cashier name
+    if (columnCheck.rows[0].exists) {
+      query += ` GROUP BY pt.branch ORDER BY revenue DESC`;
+    } else {
+      query += ` GROUP BY u.name ORDER BY revenue DESC`;
+    }
+    
+    console.log('Running query...');
     const result = await pool.query(query, params);
+    console.log('Branch reports found:', result.rows.length, 'rows');
+    
     res.json({ success: true, data: result.rows });
   } catch (err) {
     console.error('Branch reports error:', err.message);
+    console.error('Stack:', err.stack);
     res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -2346,6 +2387,7 @@ app.get('/api/pos/multi-till', protect, async (req, res) => {
       `SELECT 
         s.id as till_id,
         u.name as cashier_name,
+        COALESCE(u.branch, 'Main Branch') as branch,
         s.status,
         s.opened_at,
         s.opening_cash,
@@ -2356,7 +2398,7 @@ app.get('/api/pos/multi-till', protect, async (req, res) => {
        LEFT JOIN users u ON u.id = s.cashier_id
        LEFT JOIN pos_transactions pt ON pt.session_id = s.id
        WHERE s.company_id = $1 AND s.status = 'open'
-       GROUP BY s.id, u.name, s.status, s.opened_at, s.opening_cash
+       GROUP BY s.id, u.name, u.branch, s.status, s.opened_at, s.opening_cash
        ORDER BY s.opened_at DESC`,
       [company_id]
     );
