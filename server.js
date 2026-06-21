@@ -718,14 +718,25 @@ app.get('/api/kpis', protect, async (req, res) => {
 app.get('/api/regions', protect, async (req, res) => {
   try {
     const company_id = req.user.company_id;
+    
+    // Use INITCAP to standardize branch names
     const result = await pool.query(`
-      SELECT region, SUM(quantity * unit_price) AS revenue,
-        SUM(quantity * unit_price - quantity * unit_cost) AS profit, COUNT(*) AS records
-      FROM sales WHERE company_id = $1
-      GROUP BY region ORDER BY revenue DESC
+      SELECT 
+        INITCAP(TRIM(region)) as region,
+        SUM(quantity * unit_price) AS revenue,
+        SUM(quantity * unit_price - quantity * unit_cost) AS profit, 
+        COUNT(*) AS records
+      FROM sales 
+      WHERE company_id = $1 
+        AND region IS NOT NULL 
+        AND region != ''
+      GROUP BY INITCAP(TRIM(region))
+      ORDER BY revenue DESC
     `, [company_id]);
+    
     res.json({ success: true, data: result.rows });
   } catch (err) {
+    console.error('Regions error:', err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -1976,17 +1987,17 @@ app.post('/api/pos/transactions', protect, noViewer, checkTransactionLimit, asyn
     const total = subtotal - (parseFloat(discount) || 0);
     const reference = offline_reference || 'POS' + Date.now().toString().slice(-9);
     
-    // ── 1. INSERT INTO pos_transactions ──
-    const txResult = await pool.query(
-      `INSERT INTO pos_transactions 
-       (company_id, session_id, cashier_id, reference_number, items, subtotal, discount, total, 
-        payment_method, customer_name, customer_phone, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
-       RETURNING *`,
-      [company_id, session_id, req.user.id, reference, JSON.stringify(items), subtotal, discount || 0, total, 
-       payment_method || 'Cash', customer_name || 'Walk-in', customer_phone || '']
-    );
-    
+   // ── 1. INSERT INTO pos_transactions ──
+const txResult = await pool.query(
+  `INSERT INTO pos_transactions 
+   (company_id, session_id, cashier_id, reference_number, items, subtotal, discount, total, 
+    payment_method, customer_name, customer_phone, branch, created_at)
+   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
+   RETURNING *`,
+  [company_id, session_id, req.user.id, reference, JSON.stringify(items), subtotal, discount || 0, total, 
+   payment_method || 'Cash', customer_name || 'Walk-in', customer_phone || '', 
+   req.user.branch || 'Main Branch']
+);
     // ── 2. INSERT INTO sales table (for Analytics, Reports, Forecasting) ──
     for (const item of items) {
       await pool.query(
@@ -1999,6 +2010,7 @@ app.post('/api/pos/transactions', protect, noViewer, checkTransactionLimit, asyn
         [
           item.product,
           item.category || 'POS Sale',
+          req.user.branch || 'Main Branch',
           customer_name || 'Walk-in',
           item.quantity,
           item.unit_price,
