@@ -196,10 +196,37 @@ const ONEKHUSA_API_SECRET = 'D-AGtrOiPtGOV_rib35EFKbh_flXmLSGlWbx_64eIpzLP7TJID5
 const ONEKHUSA_ORG_ID = 'LFT0XD8WJIQK';
 const ONEKHUSA_MERCHANT = 87949766;
 
+// ── PLAN PRICES WITH FEATURES ─────────────────────────────
 const PLAN_PRICES = {
-  starter:      { monthly: 5000,  name: 'Starter' },
-  professional: { monthly: 10000, name: 'Professional' },
-  enterprise:   { monthly: 50000, name: 'Enterprise' }
+  starter: { 
+    monthly: 5000, 
+    name: 'Starter',
+    users: 1,
+    daily_limit: 10,
+    features: ['10 transactions/day', 'POS Access', 'Offline Mode', 'Basic Sales', '1 User', 'Email Support']
+  },
+  professional: { 
+    monthly: 10000, 
+    name: 'Professional',
+    users: 2,
+    daily_limit: 50,
+    features: ['50 transactions/day', 'Full POS', 'Offline Mode', 'Inventory Management', 'Barcode Scanner', 'QR Receipts', '2 Users', 'Email + WhatsApp Support']
+  },
+  enterprise: { 
+    monthly: 50000, 
+    name: 'Enterprise',
+    users: 10,
+    daily_limit: 999999,
+    features: ['Unlimited transactions', 'Full POS', 'Offline Mode', 'Inventory Management', 'Barcode Scanner', 'QR Receipts', 'Loyalty Program', 'Branch Reports', 'Till Reports', 'Reconciliation', 'Multi-Till Dashboard', '10+ Users', 'API Access', 'Priority Support']
+  }
+};
+
+// Helper function to get daily limit
+const getDailyLimit = (plan) => {
+  if (plan === 'starter') return 10;
+  if (plan === 'professional') return 50;
+  if (plan === 'enterprise') return 999999;
+  return 10; // Default for trial
 };
 
 const generateReference = () => {
@@ -249,7 +276,7 @@ const checkTransactionLimit = async (req, res, next) => {
     const company_id = req.user ? req.user.company_id : req.company_id;
     const result = await pool.query(
       `SELECT subscription_status, subscription_expires_at,
-              trial_ends_at, daily_sales_count, daily_sales_date
+              trial_ends_at, daily_sales_count, daily_sales_date, plan
        FROM companies WHERE id = $1`,
       [company_id]
     );
@@ -261,6 +288,10 @@ const checkTransactionLimit = async (req, res, next) => {
     const trialActive = company.subscription_status === 'trial' && trialEnd > now;
     const subActive = company.subscription_status === 'active' && subEnd && subEnd > now;
     if (trialActive || subActive) return next();
+    
+    // Determine daily limit based on plan
+    const dailyLimit = getDailyLimit(company.plan);
+    
     const today = new Date().toISOString().split('T')[0];
     const lastDate = company.daily_sales_date
       ? new Date(company.daily_sales_date).toISOString().split('T')[0] : null;
@@ -271,11 +302,11 @@ const checkTransactionLimit = async (req, res, next) => {
       );
       company.daily_sales_count = 0;
     }
-    if (company.daily_sales_count >= 10) {
+    if (company.daily_sales_count >= dailyLimit) {
       return res.status(429).json({
         success: false, limited: true,
-        message: 'Daily limit of 10 transactions reached. Subscribe to SABIAS for unlimited transactions.',
-        daily_count: company.daily_sales_count, daily_limit: 10
+        message: `Daily limit of ${dailyLimit} transactions reached. Upgrade your plan for more.`,
+        daily_count: company.daily_sales_count, daily_limit: dailyLimit
       });
     }
     await pool.query(
@@ -718,8 +749,6 @@ app.get('/api/kpis', protect, async (req, res) => {
 app.get('/api/regions', protect, async (req, res) => {
   try {
     const company_id = req.user.company_id;
-    
-    // Use INITCAP to standardize branch names
     const result = await pool.query(`
       SELECT 
         INITCAP(TRIM(region)) as region,
@@ -733,7 +762,6 @@ app.get('/api/regions', protect, async (req, res) => {
       GROUP BY INITCAP(TRIM(region))
       ORDER BY revenue DESC
     `, [company_id]);
-    
     res.json({ success: true, data: result.rows });
   } catch (err) {
     console.error('Regions error:', err.message);
@@ -870,6 +898,31 @@ app.post('/api/users', protect, adminOnly, async (req, res) => {
   try {
     const company_id = req.user.company_id;
     const { name, email, password, role, region } = req.body;
+    
+    // Check user limit based on plan
+    const companyResult = await pool.query(
+      `SELECT plan FROM companies WHERE id = $1`,
+      [company_id]
+    );
+    const plan = companyResult.rows[0]?.plan || 'starter';
+    
+    let maxUsers = 1;
+    if (plan === 'starter') maxUsers = 1;
+    else if (plan === 'professional') maxUsers = 2;
+    else if (plan === 'enterprise') maxUsers = 10;
+    
+    const userCount = await pool.query(
+      `SELECT COUNT(*) FROM users WHERE company_id = $1 AND active = true`,
+      [company_id]
+    );
+    
+    if (parseInt(userCount.rows[0].count) >= maxUsers) {
+      return res.status(400).json({
+        success: false,
+        error: `Your plan (${plan}) allows a maximum of ${maxUsers} user(s). Upgrade to add more users.`
+      });
+    }
+    
     const hashedPassword = await bcrypt.hash(password, 10);
     const result = await pool.query(
       `INSERT INTO users (name, email, password, role, region, company_id)
@@ -1100,7 +1153,7 @@ app.get('/api/trial/status', protect, async (req, res) => {
     const company_id = req.user.company_id;
     const result = await pool.query(
       `SELECT active, trial_ends_at, subscription_status, subscription_expires_at,
-              daily_sales_count, daily_sales_date, NOW() as current_time
+              daily_sales_count, daily_sales_date, plan, NOW() as current_time
        FROM companies WHERE id = $1`,
       [company_id]
     );
@@ -1130,14 +1183,16 @@ app.get('/api/trial/status', protect, async (req, res) => {
         message = `Free trial — ${daysLeftTrial} day(s) remaining.`;
       }
     } else if (company.subscription_status === 'active') {
+      const dailyLimit = getDailyLimit(company.plan);
       if (daysLeftSub !== null && daysLeftSub <= 0) {
         status = 'limited'; limited = true;
-        message = `Subscription ended. You have ${Math.max(0, 10 - dailyCount)} transactions left today. Renew to restore unlimited access.`;
+        message = `Subscription ended. You have ${Math.max(0, dailyLimit - dailyCount)} transactions left today. Renew to restore unlimited access.`;
       } else if (daysLeftSub !== null && daysLeftSub <= 3) {
         status = 'sub_warning'; daysLeft = daysLeftSub;
         message = `Subscription expires in ${daysLeftSub} day(s)! Renew to avoid limits.`;
       } else {
         status = 'active'; daysLeft = daysLeftSub;
+        message = `Plan: ${company.plan || 'Starter'} · ${dailyLimit === 999999 ? 'Unlimited' : dailyLimit + ' transactions/day'}`;
       }
     }
     res.json({
@@ -1149,6 +1204,8 @@ app.get('/api/trial/status', protect, async (req, res) => {
         trial_ends_at: company.trial_ends_at,
         subscription_expires_at: company.subscription_expires_at,
         active: company.active,
+        plan: company.plan,
+        plan_features: PLAN_PRICES[company.plan]?.features || []
       }
     });
   } catch (err) {
@@ -1383,11 +1440,14 @@ app.get('/api/v1/categories', apiKeyAuth, async (req, res) => {
 app.get('/api/v1/regions', apiKeyAuth, async (req, res) => {
   try {
     const result = await pool.query(`
-      SELECT region, SUM(quantity * unit_price) AS revenue,
+      SELECT INITCAP(TRIM(region)) as region,
+        SUM(quantity * unit_price) AS revenue,
         SUM(quantity * unit_price - quantity * unit_cost) AS profit,
         COUNT(*) AS transactions, SUM(quantity) AS units_sold
       FROM sales WHERE company_id = $1
-      GROUP BY region ORDER BY revenue DESC
+        AND region IS NOT NULL AND region != ''
+      GROUP BY INITCAP(TRIM(region))
+      ORDER BY revenue DESC
     `, [req.company_id]);
     res.json({ success: true, count: result.rows.length, data: result.rows, company: req.apiKey.company_name });
   } catch (err) {
@@ -1419,8 +1479,9 @@ app.get('/api/billing/plans', protect, async (req, res) => {
   try {
     const company_id = req.user.company_id;
     const result = await pool.query(
-      `SELECT subscription_status, subscription_expires_at, trial_ends_at, daily_sales_count, daily_sales_date
-       FROM companies WHERE id = $1`, [company_id]
+      `SELECT subscription_status, subscription_expires_at, trial_ends_at, daily_sales_count, daily_sales_date, plan
+       FROM companies WHERE id = $1`,
+      [company_id]
     );
     const company = result.rows[0];
     const now = new Date();
@@ -1429,13 +1490,27 @@ app.get('/api/billing/plans', protect, async (req, res) => {
     const today = new Date().toISOString().split('T')[0];
     const lastDate = company.daily_sales_date ? new Date(company.daily_sales_date).toISOString().split('T')[0] : null;
     const dailyCount = lastDate !== today ? 0 : (company.daily_sales_count || 0);
+    
+    // Build plan data with features
+    const plans = {};
+    for (const [key, value] of Object.entries(PLAN_PRICES)) {
+      plans[key] = {
+        ...value,
+        current: company.plan === key
+      };
+    }
+    
     res.json({
       success: true,
       data: {
         subscription_status: company.subscription_status,
         trial_ends_at: company.trial_ends_at,
         subscription_expires_at: company.subscription_expires_at,
-        days_left: daysLeft, daily_count: dailyCount, daily_limit: 10, plans: PLAN_PRICES
+        days_left: daysLeft,
+        daily_count: dailyCount,
+        daily_limit: getDailyLimit(company.plan),
+        current_plan: company.plan || 'starter',
+        plans: plans
       }
     });
   } catch (err) {
@@ -1512,13 +1587,11 @@ app.post('/api/billing/webhook', async (req, res) => {
 
     const body = req.body;
 
-    // 1. Check if this is a successful payment
     if (body.ResponseCode !== 'S100' && body.ResponseCode !== 'S') {
       console.log('Not a success response. Code:', body.ResponseCode);
       return res.status(200).send('Webhook received');
     }
 
-    // 2. Extract reference number from correct path
     const reference = body.MetaData?.ReferenceNumber;
     if (!reference) {
       console.error('Missing ReferenceNumber in payload');
@@ -1527,7 +1600,6 @@ app.post('/api/billing/webhook', async (req, res) => {
 
     console.log('Payment successful for reference:', reference);
 
-    // 3. Find the pending billing record
     const billingResult = await pool.query(
       `SELECT * FROM billing WHERE reference_number = $1 AND status = 'pending'`,
       [reference]
@@ -1541,24 +1613,22 @@ app.post('/api/billing/webhook', async (req, res) => {
     const billing = billingResult.rows[0];
     console.log('Found billing: Company', billing.company_id, 'Plan', billing.plan);
 
-    // 4. Calculate subscription expiry
     const expiresAt = new Date();
     expiresAt.setMonth(expiresAt.getMonth() + billing.months);
 
-    // 5. Update company subscription
     await pool.query(
       `UPDATE companies 
        SET subscription_status = 'active', 
            subscription_expires_at = $1, 
            active = true, 
            daily_sales_count = 0, 
-           daily_sales_date = CURRENT_DATE 
-       WHERE id = $2`,
-      [expiresAt, billing.company_id]
+           daily_sales_date = CURRENT_DATE,
+           plan = $2
+       WHERE id = $3`,
+      [expiresAt, billing.plan, billing.company_id]
     );
     console.log('Company', billing.company_id, 'activated until', expiresAt);
 
-    // 6. Update billing record
     await pool.query(
       `UPDATE billing 
        SET status = 'paid', 
@@ -1569,7 +1639,6 @@ app.post('/api/billing/webhook', async (req, res) => {
     );
     console.log('Billing', reference, 'marked as paid');
 
-    // 7. Send confirmation email to admin
     try {
       const adminResult = await pool.query(
         `SELECT u.email, u.name, c.name as company_name 
@@ -1610,7 +1679,6 @@ app.post('/api/billing/webhook', async (req, res) => {
       console.error('Email error:', emailErr.message);
     }
 
-    // 8. Notify you
     try {
       sendEmail('mwandirakings@gmail.com', 
         `New Payment: ${reference} — MWK ${billing.amount_mwk}`,
@@ -1624,7 +1692,6 @@ app.post('/api/billing/webhook', async (req, res) => {
       console.error('Notification email error:', emailErr.message);
     }
 
-    // 9. Return 200 OK
     res.status(200).json({ success: true, received: true });
 
   } catch (err) {
@@ -1666,8 +1733,9 @@ app.get('/api/billing/daily-status', protect, async (req, res) => {
   try {
     const company_id = req.user.company_id;
     const result = await pool.query(
-      `SELECT subscription_status, subscription_expires_at, trial_ends_at, daily_sales_count, daily_sales_date
-       FROM companies WHERE id = $1`, [company_id]
+      `SELECT subscription_status, subscription_expires_at, trial_ends_at, daily_sales_count, daily_sales_date, plan
+       FROM companies WHERE id = $1`,
+      [company_id]
     );
     const company = result.rows[0];
     const now = new Date();
@@ -1679,12 +1747,17 @@ app.get('/api/billing/daily-status', protect, async (req, res) => {
     const today = new Date().toISOString().split('T')[0];
     const lastDate = company.daily_sales_date ? new Date(company.daily_sales_date).toISOString().split('T')[0] : null;
     const dailyCount = lastDate !== today ? 0 : (company.daily_sales_count || 0);
+    const dailyLimit = getDailyLimit(company.plan);
+    
     res.json({
       success: true,
       data: {
-        isFullAccess, dailyCount, dailyLimit: 10,
-        remaining: isFullAccess ? 'unlimited' : Math.max(0, 10 - dailyCount),
-        subscription_status: company.subscription_status
+        isFullAccess,
+        dailyCount,
+        dailyLimit: dailyLimit === 999999 ? 'Unlimited' : dailyLimit,
+        remaining: isFullAccess ? 'unlimited' : Math.max(0, dailyLimit - dailyCount),
+        subscription_status: company.subscription_status,
+        plan: company.plan || 'starter'
       }
     });
   } catch (err) {
@@ -1773,7 +1846,6 @@ app.post('/api/disbursements', protect, adminOnly, async (req, res) => {
     });
     const onekhusaRef = response.body.transactionReferenceNumber || null;
 
-    // Auto-approve if submission succeeded
     if (response.body.responseCode === 'S100' && onekhusaRef) {
       const approvePayload = JSON.stringify({
         merchantAccountNumber: ONEKHUSA_MERCHANT,
@@ -1879,7 +1951,6 @@ app.post('/api/pos/sessions/open', protect, async (req, res) => {
     const company_id = req.user.company_id;
     const { opening_cash } = req.body;
     
-    // Close any open sessions first
     await pool.query(
       `UPDATE pos_sessions SET closed_at = NOW(), status = 'closed'
        WHERE company_id = $1 AND status = 'open'`,
@@ -1906,7 +1977,6 @@ app.put('/api/pos/sessions/:id/close', protect, async (req, res) => {
     const { closing_cash } = req.body;
     const company_id = req.user.company_id;
     
-    // First check if session exists and is open
     const sessionCheck = await pool.query(
       `SELECT * FROM pos_sessions WHERE id = $1 AND company_id = $2 AND status = 'open'`,
       [id, company_id]
@@ -1916,7 +1986,6 @@ app.put('/api/pos/sessions/:id/close', protect, async (req, res) => {
       return res.status(404).json({ success: false, error: 'Session not found or already closed' });
     }
     
-    // Get session totals
     const totals = await pool.query(
       `SELECT COALESCE(SUM(total), 0) as total_revenue,
               COALESCE(SUM(CASE WHEN payment_method = 'Cash' THEN total ELSE 0 END), 0) as cash_total,
@@ -1979,7 +2048,6 @@ app.post('/api/pos/transactions', protect, noViewer, checkTransactionLimit, asyn
       return res.status(400).json({ success: false, error: 'Session and items required' });
     }
     
-    // Calculate totals
     let subtotal = 0;
     for (const item of items) {
       subtotal += item.quantity * item.unit_price;
@@ -1987,25 +2055,24 @@ app.post('/api/pos/transactions', protect, noViewer, checkTransactionLimit, asyn
     const total = subtotal - (parseFloat(discount) || 0);
     const reference = offline_reference || 'POS' + Date.now().toString().slice(-9);
     
-   // ── 1. INSERT INTO pos_transactions ──
-const txResult = await pool.query(
-  `INSERT INTO pos_transactions 
-   (company_id, session_id, cashier_id, reference_number, items, subtotal, discount, total, 
-    payment_method, customer_name, customer_phone, branch, created_at)
-   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
-   RETURNING *`,
-  [company_id, session_id, req.user.id, reference, JSON.stringify(items), subtotal, discount || 0, total, 
-   payment_method || 'Cash', customer_name || 'Walk-in', customer_phone || '', 
-   req.user.branch || 'Main Branch']
-);
-    // ── 2. INSERT INTO sales table (for Analytics, Reports, Forecasting) ──
+    const txResult = await pool.query(
+      `INSERT INTO pos_transactions 
+       (company_id, session_id, cashier_id, reference_number, items, subtotal, discount, total, 
+        payment_method, customer_name, customer_phone, branch, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
+       RETURNING *`,
+      [company_id, session_id, req.user.id, reference, JSON.stringify(items), subtotal, discount || 0, total, 
+       payment_method || 'Cash', customer_name || 'Walk-in', customer_phone || '', 
+       req.user.branch || 'Main Branch']
+    );
+    
     for (const item of items) {
       await pool.query(
         `INSERT INTO sales (
           sale_date, product, category, region, customer,
           quantity, unit_price, unit_cost, salesperson, payment, company_id, approval_status
         ) VALUES (
-          NOW(), $1, $2, NULL, $3, $4, $5, $6, $7, $8, $9, 'approved'
+          NOW(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'approved'
         )`,
         [
           item.product,
@@ -2022,7 +2089,6 @@ const txResult = await pool.query(
       );
     }
     
-    // ── 3. UPDATE inventory ──
     for (const item of items) {
       await pool.query(
         `UPDATE inventory SET quantity_in_stock = GREATEST(quantity_in_stock - $1, 0), updated_at = NOW()
@@ -2031,7 +2097,6 @@ const txResult = await pool.query(
       );
     }
     
-    // ── 4. UPDATE session transaction count ──
     await pool.query(
       `UPDATE pos_sessions SET total_transactions = total_transactions + 1
        WHERE id = $1`,
@@ -2063,7 +2128,6 @@ app.get('/api/pos/transactions', protect, async (req, res) => {
     const params = [company_id];
     let p = 1;
     
-    // If not admin, filter by cashier_id
     if (role !== 'admin') {
       p++; query += ` AND cashier_id = $${p}`;
       params.push(user_id);
@@ -2109,7 +2173,6 @@ app.get('/api/pos/summary', protect, async (req, res) => {
     `;
     const params = [company_id, targetDate];
     
-    // If not admin, filter by cashier_id
     if (role !== 'admin') {
       query += ` AND cashier_id = $3`;
       params.push(user_id);
@@ -2144,7 +2207,6 @@ app.get('/api/loyalty/customer', protect, async (req, res) => {
     );
     
     if (result.rows.length === 0) {
-      // Create new customer
       const newCustomer = await pool.query(
         `INSERT INTO loyalty_customers (company_id, name, phone, points) 
          VALUES ($1, $2, $3, 0) RETURNING *`,
@@ -2170,7 +2232,6 @@ app.post('/api/loyalty/earn', protect, async (req, res) => {
       return res.status(400).json({ success: false, error: 'Phone and amount required' });
     }
     
-    // 1 point per MWK 100 spent
     const pointsToAdd = Math.floor(amount / 100);
     
     const result = await pool.query(
@@ -2182,7 +2243,6 @@ app.post('/api/loyalty/earn', protect, async (req, res) => {
     );
     
     if (result.rows.length === 0) {
-      // Create customer if not exists
       const newCustomer = await pool.query(
         `INSERT INTO loyalty_customers (company_id, name, phone, points) 
          VALUES ($1, $2, $3, $4) RETURNING *`,
@@ -2213,7 +2273,6 @@ app.get('/api/pos/receipts', protect, async (req, res) => {
     const params = [company_id];
     let p = 1;
     
-    // If not admin, filter by cashier_id
     if (role !== 'admin') {
       p++; query += ` AND cashier_id = $${p}`;
       params.push(user_id);
@@ -2232,6 +2291,7 @@ app.get('/api/pos/receipts', protect, async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+
 // ══════════════════════════════════════════════════════════
 //  BRANCH REPORTS
 // ══════════════════════════════════════════════════════════
@@ -2242,9 +2302,6 @@ app.get('/api/pos/branch-reports', protect, async (req, res) => {
     const user_id = req.user.id;
     const role = req.user.role;
     
-    console.log('Branch reports called for company:', company_id);
-    
-    // Check if branch column exists in pos_transactions
     const columnCheck = await pool.query(`
       SELECT EXISTS (
         SELECT 1 
@@ -2253,14 +2310,11 @@ app.get('/api/pos/branch-reports', protect, async (req, res) => {
       );
     `);
     
-    console.log('Branch column exists?', columnCheck.rows[0].exists);
-    
     let query;
     const params = [company_id];
     let p = 1;
     
     if (columnCheck.rows[0].exists) {
-      // Branch column exists - use it
       query = `
         SELECT 
           COALESCE(NULLIF(pt.branch, ''), 'Main Branch') as branch,
@@ -2271,7 +2325,6 @@ app.get('/api/pos/branch-reports', protect, async (req, res) => {
         WHERE pt.company_id = $1
       `;
     } else {
-      // Branch column doesn't exist - use cashier name as branch
       query = `
         SELECT 
           COALESCE(u.name, 'Unknown') as branch,
@@ -2284,28 +2337,22 @@ app.get('/api/pos/branch-reports', protect, async (req, res) => {
       `;
     }
     
-    // If not admin, filter by cashier_id
     if (role !== 'admin') {
       p++;
       query += ` AND pt.cashier_id = $${p}`;
       params.push(user_id);
     }
     
-    // Group by branch or cashier name
     if (columnCheck.rows[0].exists) {
       query += ` GROUP BY pt.branch ORDER BY revenue DESC`;
     } else {
       query += ` GROUP BY u.name ORDER BY revenue DESC`;
     }
     
-    console.log('Running query...');
     const result = await pool.query(query, params);
-    console.log('Branch reports found:', result.rows.length, 'rows');
-    
     res.json({ success: true, data: result.rows });
   } catch (err) {
     console.error('Branch reports error:', err.message);
-    console.error('Stack:', err.stack);
     res.status(500).json({ success: false, error: err.message });
   }
 });
