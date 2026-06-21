@@ -232,7 +232,6 @@ const PLAN_PRICES = {
       'Product Performance',
       'Salesperson Performance',
       'CSV/PDF Reports Export',
-      'Basic Forecasting',
       '2 Admins + 2 Salespersons',
       'Unlimited Viewers',
       'Email + WhatsApp Support'
