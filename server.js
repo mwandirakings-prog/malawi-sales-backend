@@ -1828,6 +1828,8 @@ app.post('/api/billing/ctechpay/checkout', protect, adminOnly, async (req, res) 
     const company_id = req.user.company_id;
     const { plan, months, payment_method, phone } = req.body;
     
+    console.log('CtechPay Checkout Request:', { plan, months, payment_method, phone });
+    
     if (!PLAN_PRICES[plan]) {
       return res.status(400).json({ 
         success: false, 
@@ -1847,15 +1849,14 @@ app.post('/api/billing/ctechpay/checkout', protect, adminOnly, async (req, res) 
     
     // Handle different payment methods
     if (payment_method === 'airtel' || payment_method === 'tnm') {
-      // Mobile Money
+      // Mobile Money - Airtel
       const payload = {
         token: CTECHPAY_API_TOKEN,
         amount: amount,
-        phone: phone || '0999123456',
-        category_flag: 'SUBSCRIPTION',
-        customer_reference: reference,
-        customer_message: `SABIAS ${PLAN_PRICES[plan].name} Plan - ${months} Month(s)`
+        phone: phone || '0999123456'
       };
+      
+      console.log('CtechPay Mobile Payload:', JSON.stringify(payload, null, 2));
       
       const response = await new Promise((resolve, reject) => {
         const data = JSON.stringify(payload);
@@ -1872,22 +1873,39 @@ app.post('/api/billing/ctechpay/checkout', protect, adminOnly, async (req, res) 
         const req2 = https.request(options, (r) => {
           let body = '';
           r.on('data', chunk => body += chunk);
-          r.on('end', () => resolve({ status: r.statusCode, body: JSON.parse(body) }));
+          r.on('end', () => {
+            console.log('CtechPay Mobile Response Status:', r.statusCode);
+            console.log('CtechPay Mobile Response Body:', body);
+            try {
+              resolve({ status: r.statusCode, body: JSON.parse(body) });
+            } catch (e) {
+              resolve({ status: r.statusCode, body: { error: 'Invalid JSON response', raw: body } });
+            }
+          });
         });
-        req2.on('error', reject);
+        req2.on('error', (err) => {
+          console.error('CtechPay Mobile Request Error:', err);
+          reject(err);
+        });
         req2.write(data);
         req2.end();
       });
       
-      if (response.status !== 200 || response.body.status !== 'success') {
+      console.log('CtechPay Mobile Response:', JSON.stringify(response.body, null, 2));
+      
+      // Check for success - the API returns status: "success" and trans_id
+      const isSuccess = response.body.status === 'success' && response.body.trans_id;
+      
+      if (!isSuccess) {
         return res.status(400).json({ 
           success: false, 
-          error: 'Mobile payment initiation failed. Please try again.',
+          error: response.body.message || 'Mobile payment initiation failed. Please try again.',
           details: response.body 
         });
       }
       
       const trans_id = response.body.trans_id;
+      
       await pool.query(
         `UPDATE billing SET payment_transaction_id = $1, gateway_reference = $2 WHERE reference_number = $3`,
         [trans_id, trans_id, reference]
@@ -1910,15 +1928,14 @@ app.post('/api/billing/ctechpay/checkout', protect, adminOnly, async (req, res) 
       const payload = {
         token: CTECHPAY_API_TOKEN,
         amount: amount,
-        category_flag: 'SUBSCRIPTION',
-        customer_reference: reference,
-        customer_message: `SABIAS ${PLAN_PRICES[plan].name} Plan - ${months} Month(s)`,
         merchantAttributes: true,
         redirectUrl: `https://sabiasanalytics.com?payment=success&ref=${reference}`,
         cancelUrl: `https://sabiasanalytics.com?payment=cancel&ref=${reference}`,
         cancelText: 'Cancel Payment',
         skipConfirmationPage: false
       };
+      
+      console.log('CtechPay Card Payload:', JSON.stringify(payload, null, 2));
       
       const response = await new Promise((resolve, reject) => {
         const data = JSON.stringify(payload);
@@ -1935,22 +1952,39 @@ app.post('/api/billing/ctechpay/checkout', protect, adminOnly, async (req, res) 
         const req2 = https.request(options, (r) => {
           let body = '';
           r.on('data', chunk => body += chunk);
-          r.on('end', () => resolve({ status: r.statusCode, body: JSON.parse(body) }));
+          r.on('end', () => {
+            console.log('CtechPay Card Response Status:', r.statusCode);
+            console.log('CtechPay Card Response Body:', body);
+            try {
+              resolve({ status: r.statusCode, body: JSON.parse(body) });
+            } catch (e) {
+              resolve({ status: r.statusCode, body: { error: 'Invalid JSON response', raw: body } });
+            }
+          });
         });
-        req2.on('error', reject);
+        req2.on('error', (err) => {
+          console.error('CtechPay Card Request Error:', err);
+          reject(err);
+        });
         req2.write(data);
         req2.end();
       });
       
-      if (response.status !== 200 || !response.body.payment_page_URL) {
+      console.log('CtechPay Card Response:', JSON.stringify(response.body, null, 2));
+      
+      // Check for success - the API returns order_reference and payment_page_URL
+      const isSuccess = response.body.order_reference && response.body.payment_page_URL;
+      
+      if (!isSuccess) {
         return res.status(400).json({ 
           success: false, 
-          error: 'Card payment initiation failed. Please try again.',
+          error: response.body.message || 'Card payment initiation failed. Please try again.',
           details: response.body 
         });
       }
       
       const order_reference = response.body.order_reference;
+      
       await pool.query(
         `UPDATE billing SET payment_transaction_id = $1, gateway_reference = $2 WHERE reference_number = $3`,
         [order_reference, order_reference, reference]
@@ -1993,6 +2027,8 @@ app.post('/api/billing/ctechpay/checkout', protect, adminOnly, async (req, res) 
     }
     
   } catch (err) {
+    console.error('CtechPay Checkout Error:', err.message);
+    console.error('CtechPay Checkout Stack:', err.stack);
     res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -2012,6 +2048,7 @@ app.get('/api/billing/ctechpay/status/:trans_id', protect, async (req, res) => {
       return res.status(404).json({ success: false, error: 'Transaction not found' });
     }
     
+    // Check status with CtechPay
     const payload = { trans_id: trans_id };
     const response = await new Promise((resolve, reject) => {
       const data = JSON.stringify(payload);
@@ -2028,7 +2065,14 @@ app.get('/api/billing/ctechpay/status/:trans_id', protect, async (req, res) => {
       const req2 = https.request(options, (r) => {
         let body = '';
         r.on('data', chunk => body += chunk);
-        r.on('end', () => resolve({ status: r.statusCode, body: JSON.parse(body) }));
+        r.on('end', () => {
+          console.log('CtechPay Status Response:', body);
+          try {
+            resolve({ status: r.statusCode, body: JSON.parse(body) });
+          } catch (e) {
+            resolve({ status: r.statusCode, body: { error: 'Invalid JSON response', raw: body } });
+          }
+        });
       });
       req2.on('error', reject);
       req2.write(data);
@@ -2036,6 +2080,7 @@ app.get('/api/billing/ctechpay/status/:trans_id', protect, async (req, res) => {
     });
     
     const statusData = response.body;
+    // Check if transaction was successful - TS means Transaction Successful
     const isSuccess = statusData.transaction_status === 'TS';
     
     if (isSuccess && response.status === 200) {
@@ -2063,17 +2108,59 @@ app.get('/api/billing/ctechpay/status/:trans_id', protect, async (req, res) => {
          WHERE reference_number = $2`,
         [statusData.airtel_money_id || trans_id, billing.reference_number]
       );
+      
+      // Send confirmation email
+      try {
+        const adminResult = await pool.query(
+          `SELECT u.email, u.name, c.name as company_name 
+           FROM users u 
+           JOIN companies c ON c.id = u.company_id 
+           WHERE u.company_id = $1 AND u.role = 'admin' 
+           LIMIT 1`,
+          [billing.company_id]
+        );
+        
+        if (adminResult.rows.length > 0) {
+          const admin = adminResult.rows[0];
+          const html = `
+            <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;background:#FFF8F0;padding:32px;border-radius:12px;">
+              <div style="background:#3E1F00;padding:20px 32px;border-radius:10px;text-align:center;margin-bottom:24px;">
+                <div style="color:#FFB800;font-size:28px;font-weight:bold;letter-spacing:4px;">SABIAS</div>
+                <div style="color:#FF6B35;font-size:11px;margin-top:4px;">Payment Confirmation</div>
+              </div>
+              <div style="background:#E8F5E9;border-left:4px solid #2D6A4F;border-radius:10px;padding:20px;margin-bottom:20px;">
+                <div style="color:#2D6A4F;font-size:20px;font-weight:bold;margin-bottom:8px;">Payment Successful!</div>
+                <div style="color:#333;font-size:14px;">Hi ${admin.name}, your SABIAS subscription for <strong>${admin.company_name}</strong> is now active via CtechPay.</div>
+              </div>
+              <div style="background:white;border-radius:10px;padding:20px;border-left:4px solid #2D6A4F;margin-bottom:16px;">
+                <div style="color:#3E1F00;font-size:14px;margin:8px 0;">Plan: <strong>${billing.plan.toUpperCase()}</strong></div>
+                <div style="color:#3E1F00;font-size:14px;margin:8px 0;">Duration: <strong>${billing.months} Month(s)</strong></div>
+                <div style="color:#3E1F00;font-size:14px;margin:8px 0;">Amount: <strong>MWK ${new Intl.NumberFormat().format(billing.amount_mwk)}</strong></div>
+                <div style="color:#3E1F00;font-size:14px;margin:8px 0;">Expires: <strong>${expiresAt.toLocaleDateString()}</strong></div>
+                <div style="color:#3E1F00;font-size:14px;margin:8px 0;">Reference: <strong>${billing.reference_number}</strong></div>
+              </div>
+              <div style="background:#3E1F00;border-radius:10px;padding:16px;text-align:center;">
+                <a href="https://sabiasanalytics.com" style="color:#FFB800;font-weight:bold;font-size:15px;text-decoration:none;">Login to SABIAS</a>
+              </div>
+            </div>`;
+          sendEmail(admin.email, `SABIAS Subscription Activated — ${admin.company_name}`, html)
+            .catch(err => console.error('Confirm email error:', err));
+        }
+      } catch (emailErr) {
+        console.error('Email error:', emailErr.message);
+      }
     }
     
     res.json({
       success: true,
       status: isSuccess ? 'completed' : 'pending',
       transaction_status: statusData.transaction_status,
-      message: statusData.message,
+      message: statusData.message || 'Transaction pending',
       data: statusData
     });
     
   } catch (err) {
+    console.error('CtechPay Status Error:', err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -2097,8 +2184,6 @@ app.get('/api/billing/ctechpay/order/status', protect, async (req, res) => {
       return res.status(404).json({ success: false, error: 'Transaction not found' });
     }
     
-    const url = `${CTECHPAY_BASE_URL}/api/v1/orders/status?orderRef=${orderRef}&token=${CTECHPAY_API_TOKEN}`;
-    
     const response = await new Promise((resolve, reject) => {
       const options = {
         hostname: 'new-api.ctechpay.com',
@@ -2112,7 +2197,14 @@ app.get('/api/billing/ctechpay/order/status', protect, async (req, res) => {
       const req2 = https.request(options, (r) => {
         let body = '';
         r.on('data', chunk => body += chunk);
-        r.on('end', () => resolve({ status: r.statusCode, body: JSON.parse(body) }));
+        r.on('end', () => {
+          console.log('CtechPay Card Status Response:', body);
+          try {
+            resolve({ status: r.statusCode, body: JSON.parse(body) });
+          } catch (e) {
+            resolve({ status: r.statusCode, body: { error: 'Invalid JSON response', raw: body } });
+          }
+        });
       });
       req2.on('error', reject);
       req2.end();
@@ -2154,6 +2246,7 @@ app.get('/api/billing/ctechpay/order/status', protect, async (req, res) => {
     });
     
   } catch (err) {
+    console.error('CtechPay Card Status Error:', err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 });
