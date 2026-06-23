@@ -196,6 +196,10 @@ const ONEKHUSA_API_SECRET = 'D-AGtrOiPtGOV_rib35EFKbh_flXmLSGlWbx_64eIpzLP7TJID5
 const ONEKHUSA_ORG_ID = 'LFT0XD8WJIQK';
 const ONEKHUSA_MERCHANT = 87949766;
 
+// ── CTECHPAY CONFIG ───────────────────────────────────────
+const CTECHPAY_API_TOKEN = 'bUJWSzVHVzMzT2FTcDdMTHMxZkU3T0wzZWpnVzI1YjNvVnhLWFRFTGtHelNRWmM2ZklTdVQ3QlNTejBQQWRZNQ';
+const CTECHPAY_BASE_URL = 'https://new-api.ctechpay.com';
+
 // ── PLAN PRICES WITH FEATURES ─────────────────────────────
 const PLAN_PRICES = {
   starter: { 
@@ -1520,7 +1524,7 @@ app.get('/api/v1/monthly', apiKeyAuth, async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════════
-//  BILLING — ONEKHUSA CHECKOUT
+//  BILLING — ONEKHUSA CHECKOUT (EXISTING - WORKING PERFECTLY)
 // ══════════════════════════════════════════════════════════
 
 app.get('/api/billing/plans', protect, async (req, res) => {
@@ -1539,7 +1543,6 @@ app.get('/api/billing/plans', protect, async (req, res) => {
     const lastDate = company.daily_sales_date ? new Date(company.daily_sales_date).toISOString().split('T')[0] : null;
     const dailyCount = lastDate !== today ? 0 : (company.daily_sales_count || 0);
     
-    // Build plan data with features
     const plans = {};
     for (const [key, value] of Object.entries(PLAN_PRICES)) {
       plans[key] = {
@@ -1577,7 +1580,8 @@ app.post('/api/billing/checkout', protect, adminOnly, async (req, res) => {
     const reference = generateReference();
     const idempotencyKey = `SAB-${Date.now()}-${Math.random().toString(36).substring(7)}`;
     await pool.query(
-      `INSERT INTO billing (company_id, plan, months, amount_mwk, reference_number, status) VALUES ($1,$2,$3,$4,$5,'pending')`,
+      `INSERT INTO billing (company_id, plan, months, amount_mwk, reference_number, status, gateway) 
+       VALUES ($1,$2,$3,$4,$5,'pending', 'onekhusa')`,
       [company_id, plan, months || 1, amount, reference]
     );
     const payload = {
@@ -1622,7 +1626,7 @@ app.post('/api/billing/checkout', protect, adminOnly, async (req, res) => {
       [responseData.paymentTransactionId, reference]
     );
     const checkoutUrl = `https://checkout.onekhusa.com/requestToPay/initiate?ptid=${responseData.paymentTransactionId}`;
-    res.json({ success: true, checkoutUrl, reference, amount, plan, months: months || 1, paymentTransactionId: responseData.paymentTransactionId });
+    res.json({ success: true, checkoutUrl, reference, amount, plan, months: months || 1, gateway: 'onekhusa', paymentTransactionId: responseData.paymentTransactionId });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -1681,7 +1685,7 @@ app.post('/api/billing/webhook', async (req, res) => {
       `UPDATE billing 
        SET status = 'paid', 
            paid_at = NOW(), 
-           onekhusa_transaction_ref = $1 
+           gateway_reference = $1 
        WHERE reference_number = $2`,
       [body.TransactionId || 'N/A', reference]
     );
@@ -1734,7 +1738,8 @@ app.post('/api/billing/webhook', async (req, res) => {
          <strong>Plan:</strong> ${billing.plan}<br>
          <strong>Amount:</strong> MWK ${billing.amount_mwk}<br>
          <strong>Reference:</strong> ${reference}<br>
-         <strong>Transaction ID:</strong> ${body.TransactionId || 'N/A'}</p>`
+         <strong>Transaction ID:</strong> ${body.TransactionId || 'N/A'}<br>
+         <strong>Gateway:</strong> ${billing.gateway || 'onekhusa'}</p>`
       ).catch(err => console.error('Notify email error:', err));
     } catch (emailErr) {
       console.error('Notification email error:', emailErr.message);
@@ -1769,7 +1774,7 @@ app.get('/api/billing/history', protect, adminOnly, async (req, res) => {
   try {
     const company_id = req.user.company_id;
     const result = await pool.query(
-      `SELECT * FROM billing WHERE company_id = $1 ORDER BY created_at DESC`, [company_id]
+      `SELECT *, gateway FROM billing WHERE company_id = $1 ORDER BY created_at DESC`, [company_id]
     );
     res.json({ success: true, data: result.rows });
   } catch (err) {
@@ -1810,6 +1815,403 @@ app.get('/api/billing/daily-status', protect, async (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ══════════════════════════════════════════════════════════
+//  CTECHPAY PAYMENT INTEGRATION (NEW)
+// ══════════════════════════════════════════════════════════
+
+// ── CTECHPAY CHECKOUT ─────────────────────────────────────
+app.post('/api/billing/ctechpay/checkout', protect, adminOnly, async (req, res) => {
+  try {
+    const company_id = req.user.company_id;
+    const { plan, months, payment_method, phone } = req.body;
+    
+    if (!PLAN_PRICES[plan]) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Invalid plan. Choose starter, professional or enterprise.' 
+      });
+    }
+    
+    const amount = PLAN_PRICES[plan].monthly * (months || 1);
+    const reference = generateReference();
+    
+    // Store billing record with ctechpay gateway
+    await pool.query(
+      `INSERT INTO billing (company_id, plan, months, amount_mwk, reference_number, status, gateway) 
+       VALUES ($1,$2,$3,$4,$5,'pending', 'ctechpay')`,
+      [company_id, plan, months || 1, amount, reference]
+    );
+    
+    // Handle different payment methods
+    if (payment_method === 'airtel' || payment_method === 'tnm') {
+      // Mobile Money
+      const payload = {
+        token: CTECHPAY_API_TOKEN,
+        amount: amount,
+        phone: phone || '0999123456',
+        category_flag: 'SUBSCRIPTION',
+        customer_reference: reference,
+        customer_message: `SABIAS ${PLAN_PRICES[plan].name} Plan - ${months} Month(s)`
+      };
+      
+      const response = await new Promise((resolve, reject) => {
+        const data = JSON.stringify(payload);
+        const options = {
+          hostname: 'new-api.ctechpay.com',
+          port: 443,
+          path: '/api/v1/airtel/payment',
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(data)
+          }
+        };
+        const req2 = https.request(options, (r) => {
+          let body = '';
+          r.on('data', chunk => body += chunk);
+          r.on('end', () => resolve({ status: r.statusCode, body: JSON.parse(body) }));
+        });
+        req2.on('error', reject);
+        req2.write(data);
+        req2.end();
+      });
+      
+      if (response.status !== 200 || response.body.status !== 'success') {
+        return res.status(400).json({ 
+          success: false, 
+          error: 'Mobile payment initiation failed. Please try again.',
+          details: response.body 
+        });
+      }
+      
+      const trans_id = response.body.trans_id;
+      await pool.query(
+        `UPDATE billing SET payment_transaction_id = $1, gateway_reference = $2 WHERE reference_number = $3`,
+        [trans_id, trans_id, reference]
+      );
+      
+      res.json({ 
+        success: true, 
+        trans_id: trans_id,
+        reference, 
+        amount, 
+        plan, 
+        months: months || 1,
+        gateway: 'ctechpay',
+        payment_method: payment_method,
+        message: 'Payment initiated. Please check your phone and approve the transaction.'
+      });
+      
+    } else if (payment_method === 'card') {
+      // Card Payment
+      const payload = {
+        token: CTECHPAY_API_TOKEN,
+        amount: amount,
+        category_flag: 'SUBSCRIPTION',
+        customer_reference: reference,
+        customer_message: `SABIAS ${PLAN_PRICES[plan].name} Plan - ${months} Month(s)`,
+        merchantAttributes: true,
+        redirectUrl: `https://sabiasanalytics.com?payment=success&ref=${reference}`,
+        cancelUrl: `https://sabiasanalytics.com?payment=cancel&ref=${reference}`,
+        cancelText: 'Cancel Payment',
+        skipConfirmationPage: false
+      };
+      
+      const response = await new Promise((resolve, reject) => {
+        const data = JSON.stringify(payload);
+        const options = {
+          hostname: 'new-api.ctechpay.com',
+          port: 443,
+          path: '/api/v1/orders',
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(data)
+          }
+        };
+        const req2 = https.request(options, (r) => {
+          let body = '';
+          r.on('data', chunk => body += chunk);
+          r.on('end', () => resolve({ status: r.statusCode, body: JSON.parse(body) }));
+        });
+        req2.on('error', reject);
+        req2.write(data);
+        req2.end();
+      });
+      
+      if (response.status !== 200 || !response.body.payment_page_URL) {
+        return res.status(400).json({ 
+          success: false, 
+          error: 'Card payment initiation failed. Please try again.',
+          details: response.body 
+        });
+      }
+      
+      const order_reference = response.body.order_reference;
+      await pool.query(
+        `UPDATE billing SET payment_transaction_id = $1, gateway_reference = $2 WHERE reference_number = $3`,
+        [order_reference, order_reference, reference]
+      );
+      
+      res.json({ 
+        success: true, 
+        checkoutUrl: response.body.payment_page_URL,
+        reference, 
+        amount, 
+        plan, 
+        months: months || 1,
+        gateway: 'ctechpay',
+        payment_method: 'card'
+      });
+      
+    } else if (payment_method === 'bank') {
+      // Bank Transfer - Manual
+      res.json({
+        success: true,
+        reference,
+        amount,
+        plan,
+        months: months || 1,
+        gateway: 'ctechpay',
+        payment_method: 'bank',
+        bank_details: {
+          bank: 'Standard Bank Malawi',
+          account_name: 'SABIAS Analytics',
+          account_number: '1234567890',
+          branch: 'City Centre',
+          reference: reference
+        }
+      });
+    } else {
+      res.status(400).json({ 
+        success: false, 
+        error: 'Invalid payment method. Choose airtel, tnm, card, or bank.' 
+      });
+    }
+    
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── CTECHPAY STATUS CHECK ──────────────────────────────────
+app.get('/api/billing/ctechpay/status/:trans_id', protect, async (req, res) => {
+  try {
+    const { trans_id } = req.params;
+    const company_id = req.user.company_id;
+    
+    const billingCheck = await pool.query(
+      `SELECT * FROM billing WHERE payment_transaction_id = $1 AND company_id = $2 AND gateway = 'ctechpay'`,
+      [trans_id, company_id]
+    );
+    
+    if (billingCheck.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Transaction not found' });
+    }
+    
+    const payload = { trans_id: trans_id };
+    const response = await new Promise((resolve, reject) => {
+      const data = JSON.stringify(payload);
+      const options = {
+        hostname: 'new-api.ctechpay.com',
+        port: 443,
+        path: '/api/v1/airtel/status',
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(data)
+        }
+      };
+      const req2 = https.request(options, (r) => {
+        let body = '';
+        r.on('data', chunk => body += chunk);
+        r.on('end', () => resolve({ status: r.statusCode, body: JSON.parse(body) }));
+      });
+      req2.on('error', reject);
+      req2.write(data);
+      req2.end();
+    });
+    
+    const statusData = response.body;
+    const isSuccess = statusData.transaction_status === 'TS';
+    
+    if (isSuccess && response.status === 200) {
+      const billing = billingCheck.rows[0];
+      const expiresAt = new Date();
+      expiresAt.setMonth(expiresAt.getMonth() + billing.months);
+      
+      await pool.query(
+        `UPDATE companies 
+         SET subscription_status = 'active', 
+             subscription_expires_at = $1, 
+             active = true, 
+             daily_sales_count = 0, 
+             daily_sales_date = CURRENT_DATE,
+             plan = $2
+         WHERE id = $3`,
+        [expiresAt, billing.plan, billing.company_id]
+      );
+      
+      await pool.query(
+        `UPDATE billing 
+         SET status = 'paid', 
+             paid_at = NOW(), 
+             gateway_reference = $1 
+         WHERE reference_number = $2`,
+        [statusData.airtel_money_id || trans_id, billing.reference_number]
+      );
+    }
+    
+    res.json({
+      success: true,
+      status: isSuccess ? 'completed' : 'pending',
+      transaction_status: statusData.transaction_status,
+      message: statusData.message,
+      data: statusData
+    });
+    
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── CTECHPAY CARD ORDER STATUS ────────────────────────────
+app.get('/api/billing/ctechpay/order/status', protect, async (req, res) => {
+  try {
+    const { orderRef } = req.query;
+    const company_id = req.user.company_id;
+    
+    if (!orderRef) {
+      return res.status(400).json({ success: false, error: 'orderRef is required' });
+    }
+    
+    const billingCheck = await pool.query(
+      `SELECT * FROM billing WHERE payment_transaction_id = $1 AND company_id = $2 AND gateway = 'ctechpay'`,
+      [orderRef, company_id]
+    );
+    
+    if (billingCheck.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Transaction not found' });
+    }
+    
+    const url = `${CTECHPAY_BASE_URL}/api/v1/orders/status?orderRef=${orderRef}&token=${CTECHPAY_API_TOKEN}`;
+    
+    const response = await new Promise((resolve, reject) => {
+      const options = {
+        hostname: 'new-api.ctechpay.com',
+        port: 443,
+        path: `/api/v1/orders/status?orderRef=${orderRef}&token=${CTECHPAY_API_TOKEN}`,
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json'
+        }
+      };
+      const req2 = https.request(options, (r) => {
+        let body = '';
+        r.on('data', chunk => body += chunk);
+        r.on('end', () => resolve({ status: r.statusCode, body: JSON.parse(body) }));
+      });
+      req2.on('error', reject);
+      req2.end();
+    });
+    
+    const statusData = response.body;
+    const isSuccess = statusData.status === 'COMPLETED' || statusData.status === 'PURCHASED';
+    
+    if (isSuccess && response.status === 200) {
+      const billing = billingCheck.rows[0];
+      const expiresAt = new Date();
+      expiresAt.setMonth(expiresAt.getMonth() + billing.months);
+      
+      await pool.query(
+        `UPDATE companies 
+         SET subscription_status = 'active', 
+             subscription_expires_at = $1, 
+             active = true, 
+             daily_sales_count = 0, 
+             daily_sales_date = CURRENT_DATE,
+             plan = $2
+         WHERE id = $3`,
+        [expiresAt, billing.plan, billing.company_id]
+      );
+      
+      await pool.query(
+        `UPDATE billing 
+         SET status = 'paid', 
+             paid_at = NOW() 
+         WHERE reference_number = $1`,
+        [billing.reference_number]
+      );
+    }
+    
+    res.json({
+      success: true,
+      status: isSuccess ? 'completed' : 'pending',
+      data: statusData
+    });
+    
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── CTECHPAY WEBHOOK ───────────────────────────────────────
+app.post('/api/billing/ctechpay/webhook', async (req, res) => {
+  try {
+    console.log('CtechPay Webhook received:', JSON.stringify(req.body, null, 2));
+    const body = req.body;
+    
+    // Handle webhook based on payment type
+    const reference = body.order_reference || body.trans_id || body.reference || body.orderRef;
+    
+    if (!reference) {
+      console.log('No reference found in webhook');
+      return res.status(200).send('Webhook received');
+    }
+    
+    const billingResult = await pool.query(
+      `SELECT * FROM billing WHERE payment_transaction_id = $1 AND status = 'pending' AND gateway = 'ctechpay'`,
+      [reference]
+    );
+    
+    if (billingResult.rows.length === 0) {
+      console.log('No pending billing record found for:', reference);
+      return res.status(200).send('Webhook received');
+    }
+    
+    const billing = billingResult.rows[0];
+    const expiresAt = new Date();
+    expiresAt.setMonth(expiresAt.getMonth() + billing.months);
+    
+    await pool.query(
+      `UPDATE companies 
+       SET subscription_status = 'active', 
+           subscription_expires_at = $1, 
+           active = true, 
+           daily_sales_count = 0, 
+           daily_sales_date = CURRENT_DATE,
+           plan = $2
+       WHERE id = $3`,
+      [expiresAt, billing.plan, billing.company_id]
+    );
+    
+    await pool.query(
+      `UPDATE billing 
+       SET status = 'paid', 
+           paid_at = NOW() 
+       WHERE reference_number = $1`,
+      [billing.reference_number]
+    );
+    
+    console.log('CtechPay payment processed for:', billing.reference_number);
+    res.status(200).json({ success: true });
+    
+  } catch (err) {
+    console.error('CtechPay webhook error:', err.message);
+    res.status(200).json({ success: false, error: err.message });
   }
 });
 
@@ -2528,5 +2930,6 @@ app.listen(PORT, () => {
   console.log(' SABIAS Multi-Company API v2.0');
   console.log(' Running on port ' + PORT);
   console.log(' Currency: Malawian Kwacha (MWK)');
+  console.log(' Payment Gateways: OneKhusa + CtechPay');
   console.log('=====================================');
 });
